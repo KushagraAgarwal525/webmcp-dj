@@ -1,0 +1,102 @@
+:root {
+  --bg: #0d0d0f;
+  --panel: #161619;
+  --surface: #1a1a1e;
+  --surface-2: #222227;
+  --ink: #f2efe8;
+  --muted: #8a867e;
+  --line: #26262a;
+  --banana: #ffd60a;
+  --banana-soft: #fff6c2;
+  --chassis: #0d0d0f;
+  --led: #ffd60a;
+  --danger: #ff5c5c;
+  --ok: #5ce08a;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --topbar-h: 48px;
+  --rail-w: 56px;
+  --statusbar-h: 28px;
+  --radius: 8px;
+  --radius-sm: 6px;
+
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.app-shell {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
+  height: 100%;
+  background: var(--bg);
+}
+
+.app-body {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  min-height: 0;
+  position: relative;
+}
+
+.workspace {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.flyout {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--rail-w);
+  width: min(360px, 40vw);
+  z-index: 20;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.flyout-right {
+  left: auto;
+  right: 0;
+  border-right: none;
+  border-left: 1px solid var(--line);
+}

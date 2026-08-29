@@ -1,0 +1,29 @@
+# Editor UI — BananaLabs DJ
+
+The product is the **DJ workstation**. Chrome stays quiet. Full-dark **CDJ + DJM** booth — hardware chrome, not web forms.
+
+## Shell
+
+- 48px top bar: LED logo, set name, undo/redo, Play, Share. No starter buttons.
+- 56px icon rail (Assets / Set / Agent) with icon + 9px label. Active = LED outline, not a yellow fill slab.
+- Flyouts **overlay** the workspace. Do not insert permanent multi-column grids.
+- 28px status bar for track count, master BPM, WebMCP badge, activity. Not a second toolbar.
+
+## Booth
+
+- Stage is **CDJ | DJM | CDJ**: info → waveform → jog + tempo → transport/pads; center mixer is knobs + vertical faders + XF (no native `input[type=range]`).
+- Slim dock for sampler pads, record, set BPM. Arrangement/automation edit in the Set flyout.
+- Workspace must fit the viewport with `overflow: hidden` — no page scroll axes.
+
+## Tokens (`src/index.css`)
+
+- `--bg #0d0d0f`, `--panel #161619`, `--surface #1a1a1e`, `--surface-2 #222227`
+- `--ink #f2efe8`, `--muted #8a867e`, `--line #26262a`, `--banana #ffd60a`
+- Plus Jakarta Sans. Mono (JetBrains Mono) only for ids/BPM/tool names.
+
+## Chrome rules
+
+- Flush chassis, 1px metal borders, radius 6–8px.
+- Banana is an LED accent (logo, Play-on, sync chips). Never a full-width strip or rail slab.
+- Human and agent edit the same SetDoc via the command pipeline. Never mutate store state directly from tool handlers without `dispatch`.
+- Every agent-facing capability needs matching booth UI (see `dj-completeness` + `human-ai-parity` rules).

@@ -1,0 +1,27 @@
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: var(--statusbar-h);
+  padding: 0 12px;
+  border-top: 1px solid #2e2e34;
+  background: linear-gradient(180deg, #161619, #101012);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.statusbar-activity {
+  margin-left: auto;
+  color: var(--ink);
+}
+
+.webmcp-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.webmcp-badge.is-on {
+  border-color: var(--banana);
+  color: var(--banana);
+}

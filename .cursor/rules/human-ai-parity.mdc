@@ -1,0 +1,22 @@
+---
+description: Human and AI share one capability catalog and command pipeline
+alwaysApply: true
+---
+
+# Human × AI parity
+
+Humans and agents edit the **same SetDoc** through the **same command pipeline**. This is a co-performance interface, not “AI has tools, human has a subset.”
+
+## Rules
+
+1. **One catalog** — Every WebMCP tool is either:
+   - wired to booth UI (`deck` | `mixer` | `set` | `library` | `transport` | `fx` | `sampler` | `record`), or
+   - explicitly `debug-only` (raw Agent panel JSON is fine for those only).
+2. **Same path** — UI uses `dispatch(..., "ui")` or `executeLocalTool` for the identical tool the agent calls. Never a parallel mutator that skips commands.
+3. **No silent agent-only features** — If you add a tool for loops, tempo graphs, FX, etc., add the human control in the same change.
+4. **Agent panel** is an escape hatch / inspector, not the primary human surface.
+5. Keep [`src/webmcp/toolUiMap.ts`](src/webmcp/toolUiMap.ts) updated when adding tools.
+
+## Play means perform the set
+
+TopBar **Play** runs the set performer (arrangement + transitions + automations), not “load first track on A.”

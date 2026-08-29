@@ -1,0 +1,34 @@
+# BananaLabs DJ
+
+Web-based DJ workstation with a WebMCP tool surface. Human and agent edit the same `SetDoc` through one command pipeline.
+
+## Dev
+
+```bash
+npm install
+npm run dev
+```
+
+Enable WebMCP in Chrome Canary: `chrome://flags/#enable-webmcp-testing` (or launch with `--enable-features=WebMCPTesting,DevToolsWebMCPSupport`).
+
+Agent craft: `get_dj_playbook` → `get_crate_health` → `plan_set_arc` → `get_mix_points` → `apply_transition_recipe` → `preview_join` → `verify_set` → `set_propose`. Recipes compile to bass swaps, double-drops, loop-rolls, backspins — not linear washes.
+
+## Current slice
+
+- Dark shell (top bar, icon rail, status bar)
+- Upload → OPFS + IndexedDB persistence
+- Worker analysis: STFT chroma + Krumhansl–Schmuckler key, flux beatgrid, phrase-snapped sections, mid/low vocal regions, energy 1–10 + role/genre/mood
+- Library: crate health, role/energy/mood tags, re-analyze stale detector rows, cues from mix points
+- Set: peak-first arc planner, listen-score joins, power-block trims, recipe compiler
+- Two-deck playback + set performer (transitions, automations, loop-roll, backspin)
+- Command pipeline + undo/redo + agent toasts
+- WebMCP / local tools share the same `dispatch` path as the booth UI
+
+## Try the loop
+
+1. Open http://localhost:5173
+2. Assets → upload several audio files
+3. Wait for BPM / key / sections
+4. Set → **Propose** (or Agent → `set_propose` with `{"duration":"30 minutes","energy_arc":"warm-up to peak"}`)
+5. Accept proposal → Play
+

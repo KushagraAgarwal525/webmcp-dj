@@ -1,0 +1,42 @@
+.icon-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 4px;
+  background: linear-gradient(180deg, #1c1c20, #121214);
+  border-right: 1px solid #2e2e34;
+  z-index: 30;
+}
+
+.rail-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 52px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.rail-btn.is-active {
+  background: #1a1810;
+  color: var(--banana);
+  border-color: color-mix(in srgb, var(--banana) 45%, #2e2e34);
+  box-shadow: inset 0 0 10px color-mix(in srgb, var(--banana) 12%, transparent);
+}
+
+.rail-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.rail-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}

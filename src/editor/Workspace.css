@@ -1,0 +1,308 @@
+.workspace-inner.booth {
+  height: 100%;
+  max-height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  padding: 8px 10px 6px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 70% 40% at 50% 0%, #1c1a12 0%, transparent 50%),
+    var(--chassis, #0d0d0f);
+}
+
+.booth-main {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.workspace-inner.booth .proposal-banner {
+  flex: 0 0 auto;
+  max-height: 28%;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.booth-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.7fr) minmax(0, 1.15fr);
+  gap: 8px;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.cdj-deck {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #1a1a1e 0%, #101012 100%);
+  border: 1px solid #2e2e34;
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.cdj-info {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.cdj-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.cdj-deck-tag {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--banana);
+}
+
+.cdj-title-block strong {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cdj-meta {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cdj-readout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.cdj-bpm-big {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.cdj-bars {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.cdj-leds {
+  display: flex;
+  gap: 4px;
+}
+
+.cdj-leds i {
+  font-style: normal;
+  font-size: 8px;
+  font-weight: 800;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: #1a1a1e;
+  color: #444;
+  border: 1px solid #2a2a2e;
+}
+
+.cdj-leds i.on {
+  color: #111;
+  background: var(--banana);
+  border-color: var(--banana);
+}
+
+.cdj-wave {
+  flex: 0 0 auto;
+  height: 56px;
+  border-radius: 4px;
+  background: #0a0a0c;
+  border: 1px solid #2a2a2e;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.cdj-wave.empty {
+  cursor: default;
+  background: repeating-linear-gradient(
+    90deg,
+    #121214 0,
+    #121214 6px,
+    #18181c 6px,
+    #18181c 12px
+  );
+  opacity: 0.6;
+}
+
+.cdj-wave svg {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+
+.cdj-lyrics {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.cdj-lyrics span {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cdj-platter-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cdj-deck .jog {
+  flex: 1 1 auto;
+  width: min(100%, 240px);
+  max-height: min(240px, 32vh);
+}
+
+.cdj-transport {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.cdj-transport .hw-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+.cdj-pads {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.set-ruler {
+  flex: 0 0 auto;
+  background: #161619;
+  border: 1px solid #2e2e34;
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  overflow: hidden;
+}
+
+.set-ruler header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 3px;
+}
+
+.set-ruler h3 {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.set-ruler-empty {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.set-ruler-track {
+  position: relative;
+  height: 28px;
+  background: #0a0a0c;
+  border: 1px solid #2a2a2e;
+  border-radius: 3px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.set-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 4px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid #2a2a2e;
+  background: color-mix(in srgb, var(--banana) 14%, #1a1a1e);
+  box-sizing: border-box;
+}
+
+.set-block.is-active {
+  background: color-mix(in srgb, var(--banana) 30%, #1a1a1e);
+  outline: 1px solid var(--banana);
+  outline-offset: -1px;
+}
+
+.set-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #fff;
+  pointer-events: none;
+  z-index: 2;
+  transform: translateX(-1px);
+}
+
+@media (max-height: 760px) {
+  .cdj-lyrics {
+    display: none;
+  }
+  .cdj-wave {
+    height: 44px;
+  }
+  .cdj-wave svg {
+    height: 44px;
+  }
+  .cdj-bpm-big {
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .booth-stage {
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 0.65fr) minmax(0, 1fr);
+  }
+}

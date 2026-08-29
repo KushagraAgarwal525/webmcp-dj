@@ -1,0 +1,37 @@
+{
+  "name": "bananalabs",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "agent:smoke": "tsx scripts/agent-smoke.mts",
+    "analysis:smoke": "tsx scripts/analysis-smoke.mts"
+  },
+  "dependencies": {
+    "@soundtouchjs/audio-worklet": "^2.1.1",
+    "dexie": "^4.4.5",
+    "file-saver": "^2.0.5",
+    "idb-keyval": "^6.3.0",
+    "immer": "^11.1.18",
+    "jszip": "^3.10.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/file-saver": "^2.0.7",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "oxlint": "^1.79.0",
+    "playwright": "^1.62.1",
+    "tsx": "^4.23.12",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.2"
+  }
+}

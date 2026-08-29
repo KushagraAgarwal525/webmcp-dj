@@ -1,0 +1,92 @@
+.agent-panel {
+  width: min(380px, 42vw);
+}
+
+.agent-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+.agent-badge.on {
+  border-color: var(--banana);
+  color: var(--banana);
+}
+
+.agent-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  max-height: 96px;
+  overflow: auto;
+}
+
+.tool-chip {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  font-family: "JetBrains Mono", monospace;
+  padding: 2px 6px;
+}
+
+.agent-log {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-msg {
+  margin: 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.agent-msg.user {
+  background: var(--surface-2);
+}
+
+.agent-msg.system {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.agent-compose {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.agent-compose input,
+.agent-compose textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 6px 8px;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.agent-compose button {
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--banana);
+  color: #111;
+  font-weight: 600;
+  font-size: 12px;
+}

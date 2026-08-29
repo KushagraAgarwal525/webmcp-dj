@@ -1,0 +1,136 @@
+.set-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0 16px;
+  overflow: auto;
+  flex: 1;
+}
+
+.set-empty {
+  padding: 24px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.set-item {
+  display: grid;
+  grid-template-columns: 28px 1fr auto auto auto;
+  gap: 8px;
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.set-recipe {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.set-recipe-row {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.set-recipe-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  flex: 1;
+}
+
+.set-recipe-row select {
+  font-size: 12px;
+}
+
+.set-verify {
+  margin: 8px 12px;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.set-index {
+  color: var(--muted);
+  font-size: 11px;
+  padding-top: 2px;
+}
+
+.set-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.set-sub {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.set-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.proposal-card {
+  margin: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.proposal-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.proposal-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.proposal-reason {
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.proposal-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.proposal-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.proposal-actions .accept {
+  background: var(--banana);
+  border-color: var(--banana);
+  color: #111;
+  font-weight: 600;
+}

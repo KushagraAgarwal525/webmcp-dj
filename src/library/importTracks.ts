@@ -1,0 +1,86 @@
+import { useSetStore } from "../commands/pipeline";
+import { persistAnalysis } from "../storage/db";
+import { makeFileRef, writeAudioBlob, readAudioBlob } from "../storage/opfs";
+import { analyzeInWorker, decodeAudioFile } from "../analysis/runAnalysis";
+
+function parseFilename(name: string): { title: string; artist: string } {
+  const base = name.replace(/\.[^.]+$/, "");
+  const parts = base.split(" - ");
+  if (parts.length >= 2) {
+    return { artist: parts[0]!.trim(), title: parts.slice(1).join(" - ").trim() };
+  }
+  return { title: base, artist: "" };
+}
+
+const queue: File[] = [];
+let pumping = false;
+
+async function processOne(file: File) {
+  const dispatch = useSetStore.getState().dispatch;
+  const trackId = crypto.randomUUID();
+  const fileRef = makeFileRef(file.name);
+  const { title, artist } = parseFilename(file.name);
+
+  await writeAudioBlob(fileRef, file);
+  dispatch({
+    type: "library.addTrack",
+    track: { id: trackId, fileRef, title, artist },
+  });
+  dispatch({ type: "library.setAnalysisStatus", trackId, status: "running" });
+
+  try {
+    const decoded = await decodeAudioFile(file);
+    const analysis = await analyzeInWorker(decoded.samples, decoded.sampleRate);
+    analysis.durationSec = decoded.durationSec;
+    analysis.durationBars = (decoded.durationSec * analysis.bpm) / 60 / 4;
+    await persistAnalysis(trackId, analysis);
+    dispatch({ type: "library.setAnalysis", trackId, analysis });
+  } catch (err) {
+    dispatch({
+      type: "library.setAnalysisStatus",
+      trackId,
+      status: "error",
+      error: err instanceof Error ? err.message : "analysis failed",
+    });
+  }
+}
+
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  while (queue.length) {
+    const file = queue.shift()!;
+    await processOne(file);
+  }
+  pumping = false;
+}
+
+export async function importAudioFiles(files: File[]) {
+  queue.push(...files);
+  await pump();
+}
+
+export async function reanalyzeTrack(trackId: string, signal?: AbortSignal) {
+  const track = useSetStore.getState().doc.tracks[trackId];
+  if (!track) throw new Error("track not found");
+  if (signal?.aborted) throw new Error("aborted");
+  const dispatch = useSetStore.getState().dispatch;
+  dispatch({ type: "library.setAnalysisStatus", trackId, status: "running" });
+  const blob = await readAudioBlob(track.fileRef);
+  if (!blob) {
+    dispatch({
+      type: "library.setAnalysisStatus",
+      trackId,
+      status: "error",
+      error: "audio missing",
+    });
+    throw new Error("audio missing");
+  }
+  const decoded = await decodeAudioFile(blob);
+  if (signal?.aborted) throw new Error("aborted");
+  const analysis = await analyzeInWorker(decoded.samples, decoded.sampleRate);
+  analysis.durationSec = decoded.durationSec;
+  analysis.durationBars = (decoded.durationSec * analysis.bpm) / 60 / 4;
+  await persistAnalysis(trackId, analysis);
+  dispatch({ type: "library.setAnalysis", trackId, analysis });
+}

@@ -1,0 +1,43 @@
+---
+description: BananaLabs is a full DJ workstation — never ship stubs as features
+alwaysApply: true
+---
+
+# DJ Completeness (no stub features)
+
+BananaLabs is a **full web DJ workstation** for human × AI co-performance. Capability stubs that look finished are bugs.
+
+## Never claim / expose as done unless all three exist
+
+1. **SetDoc + command** (typed mutation via `dispatch`)
+2. **Audio/engine behavior** that actually performs it (not just stored state)
+3. **Human booth UI** that can do the same action without JSON
+
+If any of the three is missing, the feature is **incomplete** — finish it in the same pass or mark `debug-only` in the tool map with a one-line reason. Do not leave agent-only tools for core DJ features.
+
+## Core DJ baseline (must work end-to-end)
+
+When touching decks, mixer, set, or transport, ensure these are real — do not wait for the user to ask:
+
+- Play/pause/seek (deck + **set performer** with transitions/automations)
+- Tempo + **true keylock** (time-stretch, not `playbackRate` when keylock on)
+- Loops (in + length; audio must reloop; UI pads; `loop_out` transition must hold a loop)
+- Hotcues (set/trigger/clear + pads)
+- EQ / filter / gain / faders / crossfader
+- Arrangement trim, transitions, automation lanes
+- FX, sampler, record (when in product scope — implement, don’t stub)
+- **Share/Upload `.blset`** (SetDoc + audio round-trip for debugging)
+
+## SoundTouch caveat
+
+Prefer `@soundtouchjs/audio-worklet` (`SoundTouchNode`) for keylock. Mirror source `playbackRate` to the node and keep `pitch = 1`. Legacy ScriptProcessor `PitchShifter` is retired.
+
+## Agent taste vs app mechanics
+
+- Agent owns taste (what to play, where to mix, vibe).
+- App owns mechanics (typed tools, no English parsing in `execute`, no “smart auto-DJ” that invents sets).
+- Analysis has **no mix-in/out hints**. Agent chooses bars from sections/grid.
+
+## Before finishing a feature PR
+
+Ask: “Can a human do this from the booth UI the same way the agent does via WebMCP?” If no, add the UI.
