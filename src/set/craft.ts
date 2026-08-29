@@ -113,6 +113,23 @@ export function findDropBars(track: Track): number | null {
   return sec ? snapToPhrase(sec.startBars) : null;
 }
 
+/** Breakdown or outro after the drop — the hole a leave can aim at. */
+export function findHoleBars(track: Track): number | null {
+  const a = track.analysis;
+  if (!a) return null;
+  const drop = findDropBars(track);
+  const breakdown = a.sections.find(
+    (s) => s.label === "breakdown" && (drop == null || s.startBars + 0.5 >= drop),
+  );
+  if (breakdown) return snapToPhrase(breakdown.startBars);
+  const fromPoints = getMixPoints(track).find((p) => p.role === "breakdown");
+  if (fromPoints && (drop == null || fromPoints.phraseBars + 0.5 >= drop)) {
+    return fromPoints.phraseBars;
+  }
+  const outro = a.sections.find((s) => s.label === "outro");
+  return outro ? snapToPhrase(outro.startBars) : null;
+}
+
 export function isDropRecipe(recipe: string): boolean {
   return (
     recipe === "drop_swap" ||

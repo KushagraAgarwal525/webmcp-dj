@@ -22,6 +22,7 @@ export const TOOL_UI_MAP: Record<string, ToolUiSurface> = {
   apply_transition_recipe: "set",
   get_crate_health: "library",
   plan_set_arc: "set",
+  prepare_set: "set",
   preview_join: "set",
   tag_track: "library",
   prep_hotcues: "deck",

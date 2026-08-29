@@ -126,6 +126,7 @@ get_mix_points includes drop, 8/16 bars before drop, breakdown, mix-in/out.
 apply_transition_recipe compiles that gesture. Drop recipes also park incoming in_bars at drop−N and outgoing out_bars on the outgoing drop.
 preview_join is an ear (bass / mid / vocal / key / tempo / drop positions). It does not pick a recipe.
 plan_set_arc is track order + windows + drop cues. Joins stay unset (1-bar cut placeholder).
+prepare_set writes a first playable arrangement from crate cards (drop/hole/vocals/energy). Empty intent infers the night. You can still rewrite any join.
 verify_set ready:true means no broken automation. Warns are observations.
 
 Camelot, BPM lanes, and compile strings are in refs. Do not invent numbers.`;

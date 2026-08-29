@@ -33,6 +33,7 @@ import {
   powerBlockTrims,
   tempoRelation,
 } from "../set/craft";
+import { crateCard, crateCards, prepareSet } from "../set/prepareSet";
 import { previewJoin } from "../set/previewJoin";
 import { setPerformer } from "../audio/setPerformer";
 import { assertToolMapped } from "./toolUiMap";
@@ -166,10 +167,12 @@ function trackPayload(trackId: string, detail: "full" | "compact" = "full") {
     analysisStatus: track.analysisStatus,
     analysisError: track.analysisError,
   };
-  if (!a) return { ...base, analysis: null };
+  if (!a) return { ...base, analysis: null, card: null };
+  const card = crateCard(track);
   if (detail === "compact") {
     return {
       ...base,
+      card,
       analysis: {
         bpm: a.bpm,
         key: a.key,
@@ -192,6 +195,7 @@ function trackPayload(trackId: string, detail: "full" | "compact" = "full") {
   const downStep = Math.max(1, Math.floor(a.downbeats.length / 32));
   return {
     ...base,
+    card,
     analysis: {
       bpm: a.bpm,
       key: a.key,
@@ -357,7 +361,7 @@ export function buildCoreTools() {
       const detail = input.detail === "compact" ? "compact" : "full";
       const payload = trackPayload(String(input.track_id), detail);
       if (!payload) return toolErr("track not found");
-      return toolOk(payload);
+      return toolOkFull(payload);
     },
   });
 
@@ -548,11 +552,13 @@ export function buildCoreTools() {
     name: "get_crate_health",
     title: "Crate health",
     description:
-      "Library coverage: Camelot orphans, BPM lanes, role/genre counts. Call before plan_set_arc.",
+      "Library coverage plus crate cards (drop/hole/vocals/energy). Call before prepare_set or plan_set_arc.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
-    execute: async () => toolOkFull(crateHealth(getDoc())),
-    localExecute: async () => toolOkFull(crateHealth(getDoc())),
+    execute: async () =>
+      toolOkFull({ ...crateHealth(getDoc()), cards: crateCards(getDoc()) }),
+    localExecute: async () =>
+      toolOkFull({ ...crateHealth(getDoc()), cards: crateCards(getDoc()) }),
   });
 
   defineTool({
@@ -578,6 +584,31 @@ export function buildCoreTools() {
         return toolOkFull(await planArcExec(input));
       } catch (e) {
         return toolErr(e instanceof Error ? e.message : "plan failed");
+      }
+    },
+  });
+
+  defineTool({
+    name: "prepare_set",
+    title: "Prepare set",
+    description:
+      "Autonomous first draft from crate cards: infer the night (optional one-line intent), order tracks, pick each join from those two files, hear/verify, retry broken joins, write a playable arrangement. Empty intent is allowed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        intent: { type: "string" },
+        track_count: { type: "number" },
+        hear: { type: "boolean" },
+        apply: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    execute: async (input) => toolOkFull(await prepareSetExec(input)),
+    localExecute: async (input) => {
+      try {
+        return toolOkFull(await prepareSetExec(input));
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "prepare failed");
       }
     },
   });
@@ -2026,6 +2057,43 @@ function applyRecipeExec(input: Record<string, unknown>) {
     out_bars: entry.outBars,
     outgoing_out_bars: prev?.outBars,
   };
+}
+
+async function prepareSetExec(input: Record<string, unknown>) {
+  const prepared = await prepareSet(getDoc(), {
+    intent: input.intent != null ? String(input.intent) : undefined,
+    trackCount: input.track_count != null ? Number(input.track_count) : undefined,
+    hear: input.hear !== false,
+  });
+  const apply = input.apply !== false;
+  if (prepared.arrangement.length < 2) {
+    return { ...prepared.result, applied: false, proposed: false };
+  }
+  if (apply) {
+    dispatch({ type: "set.replaceArrangement", entries: prepared.arrangement });
+    dispatch({ type: "set.replaceAutomation", lanes: prepared.automation });
+    useSetStore.getState().setRail("set");
+    return { ...prepared.result, applied: true, proposed: false };
+  }
+  await proposeFromInput({
+    entries: prepared.arrangement.map((e) => ({
+      track_id: e.trackId,
+      in_bars: e.inBars,
+      out_bars: e.outBars,
+      transition: e.transition.type,
+      bars: e.transition.bars,
+    })),
+    automation: prepared.automation.map((l) => ({
+      param: l.param,
+      start_bars: l.startBars,
+      end_bars: l.endBars,
+      start_value: l.startValue,
+      end_value: l.endValue,
+      curve: l.curve,
+    })),
+    reason: prepared.result.inferred.reason,
+  });
+  return { ...prepared.result, applied: false, proposed: true };
 }
 
 async function planArcExec(input: Record<string, unknown>) {

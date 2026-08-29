@@ -5,6 +5,7 @@ import { importAudioFiles } from "../library/importTracks";
 import type { Track, TrackMood, TrackRole } from "../types/setdoc";
 import { analysisNeedsRefresh } from "../analysis/stale";
 import { deriveEnergyLevel } from "../set/builder";
+import { findDropBars, findHoleBars } from "../set/craft";
 import { executeLocalTool } from "../webmcp/registry";
 import { PanelHeader } from "./PanelHeader";
 
@@ -35,6 +36,8 @@ function TrackRow({ track }: { track: Track }) {
   const energy = deriveEnergyLevel(track);
   const genre = track.craft?.genreHint ?? a?.genreHint;
   const mood = track.craft?.mood ?? a?.mood;
+  const drop = findDropBars(track);
+  const hole = findHoleBars(track);
 
   return (
     <li className="track-row">
@@ -59,6 +62,8 @@ function TrackRow({ track }: { track: Track }) {
             {genre && genre !== "unknown" && <span>{genre}</span>}
             {mood && <span>{mood}</span>}
             {a.vocalLead && <span className="pill">vocal</span>}
+            {drop != null && <span className="pill">drop {drop}</span>}
+            {hole != null && <span className="pill">hole {hole}</span>}
             {analysisNeedsRefresh(a) && <span className="pill pill-err">stale</span>}
             <span>{Math.round(a.durationBars)} bars</span>
             <EnergySpark values={a.energy} />

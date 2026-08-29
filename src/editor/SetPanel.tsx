@@ -17,6 +17,8 @@ export function SetPanel() {
   const [recipe, setRecipe] = useState<TransitionRecipe>("drop_swap");
   const [arc, setArc] = useState<(typeof ARCS)[number]>("journey");
   const [bookTopic, setBookTopic] = useState<PlaybookTopic>("all");
+  const [intent, setIntent] = useState("");
+  const [preparing, setPreparing] = useState(false);
 
   async function showJson(tool: string, args: Record<string, unknown>, label: string) {
     const raw = await executeLocalTool(tool, args);
@@ -44,6 +46,54 @@ export function SetPanel() {
       setVerifyText(raw);
     }
     setActivity(label);
+  }
+
+  async function runPrepare() {
+    setPreparing(true);
+    setActivity("Preparing set…");
+    try {
+      const raw = await executeLocalTool("prepare_set", {
+        intent: intent.trim() || undefined,
+        apply: true,
+        hear: true,
+      });
+      try {
+        const parsed = JSON.parse(raw) as {
+          error?: string;
+          inferred?: { arc?: string; reason?: string };
+          joins?: Array<{
+            index: number;
+            recipe: string;
+            verdict?: string;
+            reason?: string;
+          }>;
+          verify?: { ready?: boolean; issues?: Array<{ message: string }> };
+          applied?: boolean;
+        };
+        if (parsed.error) {
+          setVerifyText(parsed.error);
+          return;
+        }
+        const joinLines = (parsed.joins ?? []).map(
+          (j) => `#${j.index} ${j.recipe} ${j.verdict ?? ""} — ${j.reason ?? ""}`.trim(),
+        );
+        const issues = (parsed.verify?.issues ?? []).map((i) => i.message);
+        setVerifyText(
+          [
+            parsed.inferred?.reason,
+            joinLines.join("\n"),
+            parsed.verify?.ready ? "verify ready" : issues.join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        );
+      } catch {
+        setVerifyText(raw.slice(0, 2000));
+      }
+      setActivity("Set prepared");
+    } finally {
+      setPreparing(false);
+    }
   }
 
   async function applyRecipe(index: number) {
@@ -94,6 +144,25 @@ export function SetPanel() {
           Clear
         </button>
       </PanelHeader>
+
+      <div className="set-recipe-row">
+        <label className="set-intent">
+          Intent
+          <input
+            type="text"
+            value={intent}
+            placeholder="optional — empty infers from crate"
+            onChange={(e) => setIntent(e.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={preparing || Object.keys(doc.tracks).length < 2}
+          onClick={() => void runPrepare()}
+        >
+          {preparing ? "Preparing…" : "Prepare"}
+        </button>
+      </div>
 
       <div className="set-recipe-row">
         <label>
@@ -182,7 +251,7 @@ export function SetPanel() {
       <ol className="set-list">
         {doc.arrangement.length === 0 && !doc.proposal && (
           <li className="set-empty">
-            Plan an arc, or mix points → recipes → Listen → verify → propose.
+            Prepare writes a playable first set from the crate. Play it, or rewrite a join.
           </li>
         )}
         {doc.automation.length > 0 && (
