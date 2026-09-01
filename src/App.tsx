@@ -10,6 +10,8 @@ import { useSetStore } from "./commands/pipeline";
 import { loadActiveSetDoc } from "./storage/db";
 import { registerToolsWithBrowser, executeLocalTool, listLocalTools } from "./webmcp/registry";
 import { audioEngine } from "./audio/engine";
+import { setPerformer } from "./audio/setPerformer";
+import { setDurationBars } from "./set/timeline";
 import "./Toasts.css";
 
 declare global {
@@ -18,6 +20,7 @@ declare global {
       listTools: typeof listLocalTools;
       callTool: typeof executeLocalTool;
       getSession: () => unknown;
+      dispatch: (command: unknown, source?: "agent" | "ui" | "system") => unknown;
     };
   }
 }
@@ -64,6 +67,8 @@ export default function App() {
         listTools: listLocalTools,
         callTool: executeLocalTool,
         getSession: () => useSetStore.getState().doc,
+        dispatch: (command, source = "agent") =>
+          useSetStore.getState().dispatch(command as never, source),
       };
     })();
 
@@ -74,7 +79,42 @@ export default function App() {
     window.addEventListener("pointerdown", unlock);
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") useSetStore.getState().setRail(null);
+      const el = e.target;
+      const typing =
+        el instanceof HTMLElement &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          el.isContentEditable);
+
+      if (e.key === "Escape") {
+        useSetStore.getState().setRail(null);
+        return;
+      }
+      if (typing) return;
+
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        void setPerformer.toggle();
+        return;
+      }
+      if (e.key >= "1" && e.key <= "8" && e.key.length === 1) {
+        useSetStore.getState().dispatch({
+          type: "sampler.trigger",
+          pad: Number(e.key),
+        });
+        return;
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        const doc = useSetStore.getState().doc;
+        const dur = setDurationBars(doc);
+        const delta = e.shiftKey ? 4 : 1;
+        const next =
+          setPerformer.getPositionBars() +
+          (e.key === "ArrowRight" ? delta : -delta);
+        void setPerformer.seek(Math.max(0, Math.min(dur, next)));
+      }
     };
     window.addEventListener("keydown", onKey);
 

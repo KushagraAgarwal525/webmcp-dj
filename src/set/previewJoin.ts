@@ -1,6 +1,6 @@
 import type { SetDoc, Track } from "../types/setdoc";
-import { classifyCamelotMove, phraseOffGrid, snapToPhrase } from "./builder";
-import { findDropBars, tempoRelation } from "./craft";
+import { auditionHarmony, classifyCamelotMove, holeParkedAt, isolatorOverlapCap, isIsolatorType, isPadType, keyIsTrusted, padCapForJoin, phraseOffGrid, snapToPhrase, vocalCovers, type HarmonyAudition } from "./builder";
+import { findDropBars, findPeakDropBars, joinCompileReport, tempoRelation } from "./craft";
 import { buildTimeline } from "./timeline";
 import { readAudioBlob } from "../storage/opfs";
 import { decodeAudioFile } from "../analysis/runAnalysis";
@@ -27,6 +27,10 @@ export type JoinListen = {
   } | null;
   verdict: "clean" | "risky" | "fail";
   notes: string[];
+  /** Measured harmony over the actual windows (null on slam/leave joins). */
+  harmony: HarmonyAudition | null;
+  /** What the compiler actually does to this join — commit bar + drop anchor. */
+  compile: ReturnType<typeof joinCompileReport>;
   drops: {
     outgoing: number | null;
     incoming: number | null;
@@ -126,15 +130,45 @@ export async function previewJoin(
   if (!ta?.analysis || !tb?.analysis) throw new Error("both tracks need analysis");
 
   const bars = cur.transition.bars;
+  const type = cur.transition.type;
+  // Leave joins: incoming is never in the speakers over the window.
+  const sequential = type === "echo_out" || type === "air_cut";
+  // Slam joins: incoming enters at the commit with its bass pre-killed —
+  // far BPM and Camelot caps do not apply, by design.
+  const slam = type === "cut" || type === "backspin";
+  const sharedClock = !sequential && !slam;
+  const isolator = isIsolatorType(type);
   const outStart = Math.max(0, prev.outBars - bars);
-  const inEnd = cur.inBars + bars;
+  const inEnd = sequential ? cur.inBars : cur.inBars + bars;
   const notes: string[] = [];
 
-  const bassClash = meanBand(ta, outStart, prev.outBars, "low") * meanBand(tb, cur.inBars, inEnd, "low");
-  const midClash = meanBand(ta, outStart, prev.outBars, "mid") * meanBand(tb, cur.inBars, inEnd, "mid");
-  const vocalOverlap = vocalsHit(ta, outStart, prev.outBars) && vocalsHit(tb, cur.inBars, inEnd);
-  if (vocalOverlap) notes.push("Both sides have vocal regions in the overlap.");
-  if (bassClash > 0.18) notes.push("Waveform lows are hot on both decks — expect double-bass.");
+  const bassClash = sequential
+    ? 0
+    : meanBand(ta, outStart, prev.outBars, "low") * meanBand(tb, cur.inBars, inEnd, "low");
+  const midClash = sequential
+    ? 0
+    : meanBand(ta, outStart, prev.outBars, "mid") * meanBand(tb, cur.inBars, inEnd, "mid");
+  const vocalOverlap =
+    !sequential &&
+    vocalsHit(ta, outStart, prev.outBars) &&
+    vocalsHit(tb, cur.inBars, inEnd);
+  if (sequential) {
+    notes.push(
+      type === "air_cut"
+        ? "Air cut: suck-out, one bar of dead air, incoming cold on its drop — no shared clock."
+        : "Leave to silence — incoming is not in the speakers during the echo.",
+    );
+  } else if (slam) {
+    notes.push("Slam join — incoming bass is killed until the commit; far BPM and Camelot caps do not apply.");
+  }
+  if (vocalOverlap && isolator) {
+    notes.push("Outgoing vocal over the incoming build — isolator keeps incoming mids down until the 1.");
+  } else if (vocalOverlap && sharedClock) {
+    notes.push("Both sides have vocal regions in the overlap.");
+  }
+  if (sharedClock && bassClash > 0.18) {
+    notes.push("Waveform lows are hot on both decks — expect double-bass.");
+  }
   if (phraseOffGrid(cur.inBars) || phraseOffGrid(prev.outBars)) {
     notes.push("Phrase off the 8-bar grid — snap before you trust the 1.");
   }
@@ -142,28 +176,124 @@ export async function previewJoin(
   const move = classifyCamelotMove(ta.analysis.key.camelot, tb.analysis.key.camelot);
   const rel = tempoRelation(ta.analysis.bpm, tb.analysis.bpm);
   const pitchPct = ((tb.analysis.bpm - ta.analysis.bpm) / ta.analysis.bpm) * 100;
-  if (move === "clash" && bars >= 8) notes.push(`Camelot clash ${ta.analysis.key.camelot}→${tb.analysis.key.camelot} on a long overlap.`);
-  if (rel === "far") notes.push("BPM gap is too wide to blend.");
+  const trusted = keyIsTrusted(ta) && keyIsTrusted(tb);
+  // Hole-aware: a blend parked on the outgoing's tonal hole can run 8 bars
+  // even on a label clash — the harmonies never co-occur.
+  const holeOk = holeParkedAt(ta, prev.outBars, bars);
+  // Audio truth over labels: audition the actual windows.
+  const sharesWindow = !sequential && !slam;
+  const harmony = sharesWindow
+    ? auditionHarmony(
+        ta,
+        Math.max(0, prev.outBars - bars),
+        prev.outBars,
+        tb,
+        cur.inBars,
+        cur.inBars + bars,
+      )
+    : null;
+  const audioOk =
+    harmony?.verdict === "blend_ok" || harmony?.verdict === "bass_only";
+  const audioClash = harmony?.verdict === "clash";
+  const padCap = audioOk
+    ? Math.max(8, padCapForJoin(ta, prev.outBars, move, trusted, bars))
+    : audioClash
+      ? 1
+      : padCapForJoin(ta, prev.outBars, move, trusted, bars);
+  const isoCap = audioClash ? 1 : isolatorOverlapCap(move);
+  const cap = isolator ? isoCap : padCap;
+  // Slam-class joins (cut / backspin / echo_out / tease_slam) chop the
+  // outgoing ON the 1 — a vocal cut on the incoming drop is the festival
+  // move, not a broken leave.
+  const midVocalLeave =
+    type !== "echo_out" &&
+    type !== "backspin" &&
+    type !== "tease_slam" &&
+    vocalCovers(ta, prev.outBars);
+  if (harmony && harmony.verdict !== "unknown") {
+    notes.push(
+      `Audio audition: ${harmony.verdict} (dissonance ${harmony.score}, roots ${harmony.locked ? "locked" : "unlocked"}) — measured from the chroma in the actual windows, not the key label.`,
+    );
+  }
+  if (holeOk && !isolator) {
+    notes.push("Hole-parked blend — the outgoing's harmony sits out of the window; the label clash is mostly moot.");
+  }
+  if (sharedClock && (move === "clash" || move === "jaws") && bars >= 8 && !holeOk && !audioOk) {
+    notes.push(`Camelot clash ${ta.analysis.key.camelot}→${tb.analysis.key.camelot} on a long overlap.`);
+  }
+  if (sharedClock && rel === "far" && type !== "tempo_ride" && type !== "tease_slam") {
+    notes.push("BPM gap is too wide to blend.");
+  }
+  if (type === "tempo_ride") {
+    notes.push(
+      `Ride: both decks ramp ${ta.analysis.bpm.toFixed(1)}→${tb.analysis.bpm.toFixed(1)} across the overlap under keylock; isolator commit on the incoming drop, then peel.`,
+    );
+  }
+  if (type === "tease_slam") {
+    notes.push(
+      `Tease slam: the incoming build bleeds in filtered under the outgoing across ${bars} bars` +
+        (Math.abs(pitchPct) > 3
+          ? `, the tempo lane rides ${ta.analysis.bpm.toFixed(0)}→${tb.analysis.bpm.toFixed(0)} across the window`
+          : "") +
+        `, roll + throw, slam on the incoming 1.`,
+    );
+    if (audioClash) {
+      notes.push(
+        "Measured clash — the tease is LP-filtered and bassless so it is mostly masked; drop to 8 bars if it still fights.",
+      );
+    }
+  }
+  if (rel === "far" && sequential) notes.push("Far BPM: each record keeps its own clock.");
+  if (rel === "far" && slam) notes.push("Far BPM: slam join — each record keeps its own clock.");
+  if (midVocalLeave) notes.push("Outgoing leave sits inside a vocal region — wait for the line.");
+  if (sharedClock && !trusted && isPadType(type) && bars >= 8 && !holeOk && !audioOk) {
+    notes.push("Key untrusted — do not pad-blend.");
+  }
+  if (sharedClock && bars > cap) {
+    notes.push(`Overlap ${bars} > ${cap} bars for ${move}.`);
+  }
+  if (isolator && !sequential) {
+    notes.push("Isolator: incoming build under the line, bass swap on the 1, then peel.");
+  }
 
-  const outDrop = findDropBars(ta);
-  const inDrop = findDropBars(tb);
+  const outDrop = findPeakDropBars(ta) ?? findDropBars(ta);
+  const inDrop = findPeakDropBars(tb) ?? findDropBars(tb);
   const cue8 = inDrop != null ? snapToPhrase(Math.max(0, inDrop - 8)) : null;
   const cue16 = inDrop != null ? snapToPhrase(Math.max(0, inDrop - 16)) : null;
-  if (inDrop != null && Math.abs(cur.inBars - inDrop) < 2 && bars >= 8) {
-    notes.push(`in_bars sits on the incoming drop (${inDrop}). A replace/stack usually cues ${bars} bars earlier.`);
+  if (inDrop != null && Math.abs(cur.inBars - inDrop) < 2 && bars >= 8 && !sequential) {
+    notes.push(
+      isolator
+        ? `in_bars sits on the incoming drop (${inDrop}) — cue the build (drop−8), not the 1.`
+        : `in_bars sits on the incoming drop (${inDrop}). A replace/stack usually cues ${bars} bars earlier.`,
+    );
   }
-  if (outDrop != null && Math.abs(prev.outBars - outDrop) > 4 && bars >= 8) {
+  if (
+    isolator &&
+    cue8 != null &&
+    Math.abs(cur.inBars - cue8) < 2 &&
+    bars >= 8
+  ) {
+    notes.push(`Incoming is on the build (drop−8 at ${cue8}).`);
+  }
+  if (outDrop != null && Math.abs(prev.outBars - outDrop) > 4 && bars >= 8 && !isolator) {
     notes.push(`outgoing leave is ${prev.outBars.toFixed(0)}; drop is ${outDrop}.`);
   }
 
-  let heard: JoinListen["heard"] = {
-    bassClash,
-    midClash,
-    highClash: meanBand(ta, outStart, prev.outBars, "high") * meanBand(tb, cur.inBars, inEnd, "high"),
-    source: "waveform",
-  };
+  let heard: JoinListen["heard"] = sequential
+    ? {
+        bassClash: 0,
+        midClash: 0,
+        highClash: 0,
+        source: "waveform",
+      }
+    : {
+        bassClash,
+        midClash,
+        highClash: meanBand(ta, outStart, prev.outBars, "high") * meanBand(tb, cur.inBars, inEnd, "high"),
+        source: "waveform",
+      };
 
-  if (hear) {
+  if (hear && !sequential) {
     try {
       const [ha, hb] = await Promise.all([
         hearWindow(ta, outStart, prev.outBars),
@@ -176,8 +306,12 @@ export async function previewJoin(
           highClash: ha.high * hb.high * 8,
           source: "pcm",
         };
-        if (heard.bassClash > 0.08) notes.push("Heard: stacked low end in the PCM window.");
-        if (heard.midClash > 0.1 && vocalOverlap) notes.push("Heard: mids fighting (likely vocals/leads).");
+        if (sharedClock && !isolator && heard.bassClash > 0.08) {
+          notes.push("Heard: stacked low end in the PCM window.");
+        }
+        if (sharedClock && !isolator && heard.midClash > 0.1 && vocalOverlap) {
+          notes.push("Heard: mids fighting (likely vocals/leads).");
+        }
       }
     } catch {
       notes.push("PCM listen failed — scored from waveform bands.");
@@ -186,15 +320,48 @@ export async function previewJoin(
 
   const incomingEnergy = sectionEnergy(tb, cur.inBars + Math.max(0, bars));
 
+  // The compile report doubles as a gate: a tease whose drop lands off the
+  // commit is geometrically broken (the outgoing clip cannot host the tease
+  // window — shrink bars or re-park the leave).
+  const compile = joinCompileReport(doc, index);
+  const teaseOffDrop = type === "tease_slam" && compile?.commit_on_drop === false;
+  if (teaseOffDrop) {
+    notes.push(
+      `Tease geometry broken: the incoming drop lands at set bar ${compile?.incoming_drop_bars ?? "?"} but the commit fires at ${compile?.commit_bars ?? "?"} — the outgoing clip cannot host ${bars} tease bars. Shrink the tease or re-park the leave.`,
+    );
+  }
+
+  // tease_slam is exempt from the raw-window caps: the tease runs LP-filtered
+  // with bass and mids held down, so raw file-on-file clash numbers overstate
+  // what the compiled lanes actually let through.
   const fail =
-    (heard?.source === "pcm" && heard.bassClash > 0.14 && bars >= 8) ||
-    (move === "clash" && bars >= 12 && incomingEnergy !== "low");
+    !sequential &&
+    (teaseOffDrop ||
+      midVocalLeave ||
+      (sharedClock && isPadType(type) && !trusted && bars >= 8 && !holeOk && !audioOk) ||
+      (sharedClock && bars > cap && type !== "tease_slam") ||
+      (sharedClock &&
+        (move === "clash" || move === "jaws") &&
+        isPadType(type) &&
+        bars >= 12 &&
+        !holeOk &&
+        !audioOk) ||
+      (sharedClock && audioClash && isPadType(type) && bars >= 8) ||
+      (sharedClock &&
+        !isolator &&
+        type !== "tease_slam" &&
+        heard?.source === "pcm" &&
+        heard.bassClash > 0.14 &&
+        bars >= 8));
   const risky =
-    vocalOverlap ||
-    bassClash > 0.16 ||
-    phraseOffGrid(cur.inBars) ||
-    rel === "far" ||
-    move === "clash";
+    !sequential &&
+    !fail &&
+    (phraseOffGrid(cur.inBars) ||
+      phraseOffGrid(prev.outBars) ||
+      (sharedClock && vocalOverlap && !isolator) ||
+      (sharedClock && !isolator && bassClash > 0.16) ||
+      (sharedClock && rel === "far" && type !== "tempo_ride" && type !== "tease_slam") ||
+      (sharedClock && move === "clash"));
 
   if (!notes.length) notes.push("Overlap looks mixable.");
 
@@ -224,6 +391,8 @@ export async function previewJoin(
     heard,
     verdict: fail ? "fail" : risky ? "risky" : "clean",
     notes,
+    harmony,
+    compile,
     drops: {
       outgoing: outDrop,
       incoming: inDrop,

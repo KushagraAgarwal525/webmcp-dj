@@ -1,14 +1,9 @@
-import type {
-  SectionLabel,
-  TrackAnalysis,
-  TrackMood,
-  TrackRole,
-  WaveformPeaks,
-} from "../types/setdoc";
+import type { SectionLabel, TrackAnalysis, WaveformPeaks } from "../types/setdoc";
 import { downsampleMono, fft, hann, hzToPitchClass, mean } from "./dsp";
 
-const KRUM_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const KRUM_MINOR = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+/** Faraldo et al. EDM key profiles (Essentia `edma`). Minor-key EDM is the norm — Krumhansl is not. */
+const EDMA_MAJOR = [1.0, 0.29, 0.5, 0.4, 0.6, 0.56, 0.32, 0.8, 0.31, 0.45, 0.42, 0.39];
+const EDMA_MINOR = [1.0, 0.31, 0.44, 0.58, 0.33, 0.49, 0.29, 0.78, 0.43, 0.29, 0.53, 0.32];
 
 const MAJOR_CAMELOT = ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"];
 const MINOR_CAMELOT = ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"];
@@ -27,8 +22,8 @@ function estimateKey(chroma: Float32Array): TrackAnalysis["key"] {
   let bestRoot = 0;
   let bestMinor = true;
   for (let root = 0; root < 12; root++) {
-    const maj = correlate(chroma, KRUM_MAJOR, root);
-    const min = correlate(chroma, KRUM_MINOR, root);
+    const maj = correlate(chroma, EDMA_MAJOR, root);
+    const min = correlate(chroma, EDMA_MINOR, root);
     const pair: [number, boolean][] = [
       [maj, false],
       [min, true],
@@ -53,7 +48,264 @@ function estimateKey(chroma: Float32Array): TrackAnalysis["key"] {
     camelot: (bestMinor ? MINOR_CAMELOT : MAJOR_CAMELOT)[bestRoot]!,
     confidence,
     name: (bestMinor ? KEY_NAMES_MIN : KEY_NAMES_MAJ)[bestRoot],
+    profile: "edma",
   };
+}
+
+function sumChroma(frames: FrameBands[], from: number, to: number): Float32Array {
+  const sum = new Float32Array(12);
+  const a = Math.max(0, from);
+  const b = Math.min(frames.length, Math.max(a + 1, to));
+  for (let i = a; i < b; i++) {
+    const ch = frames[i]?.chroma;
+    if (!ch) continue;
+    for (let c = 0; c < 12; c++) sum[c]! += ch[c]!;
+  }
+  return sum;
+}
+
+function resampleToBars(curve: number[], nBars: number): number[] {
+  const n = Math.max(1, nBars);
+  if (curve.length < 2) return Array.from({ length: n }, () => curve[0] ?? 0);
+  const out: number[] = [];
+  for (let b = 0; b < n; b++) {
+    const a = (b / n) * (curve.length - 1);
+    const i = Math.floor(a);
+    const f = a - i;
+    const lo = curve[i] ?? 0;
+    const hi = curve[Math.min(curve.length - 1, i + 1)] ?? lo;
+    out.push(lo * (1 - f) + hi * f);
+  }
+  return out;
+}
+
+function cosine(a: number[], b: number[]) {
+  let d = 0;
+  let na = 0;
+  let nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    d += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  return d / (Math.sqrt(na * nb) + 1e-9);
+}
+
+/** Foote (2000) checkerboard novelty on a feature sequence (Müller FMP C4.4). */
+export function footeNovelty(seq: number[][], kernelHalf = 4): number[] {
+  const n = seq.length;
+  if (n < 4) return seq.map(() => 0);
+  const L = Math.max(2, kernelHalf);
+  const M = 2 * L + 1;
+  const kernel: number[][] = [];
+  let ksum = 0;
+  for (let i = 0; i < M; i++) {
+    const row: number[] = [];
+    const si = Math.sign(i - L);
+    for (let j = 0; j < M; j++) {
+      const sj = Math.sign(j - L);
+      const g = Math.exp(-0.5 * (((i - L) / L) ** 2 + ((j - L) / L) ** 2));
+      const v = si * sj * g;
+      row.push(v);
+      ksum += Math.abs(v);
+    }
+    kernel.push(row);
+  }
+  if (ksum > 0) {
+    for (const row of kernel) for (let j = 0; j < row.length; j++) row[j]! /= ksum;
+  }
+  const S: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    S[i]![i] = 1;
+    for (let j = i + 1; j < n; j++) {
+      const c = cosine(seq[i]!, seq[j]!);
+      S[i]![j] = c;
+      S[j]![i] = c;
+    }
+  }
+  const nov = new Array(n).fill(0);
+  for (let t = 0; t < n; t++) {
+    let s = 0;
+    for (let ki = 0; ki < M; ki++) {
+      for (let kj = 0; kj < M; kj++) {
+        const i = t + ki - L;
+        const j = t + kj - L;
+        const sv = i >= 0 && i < n && j >= 0 && j < n ? S[i]![j]! : 0;
+        s += kernel[ki]![kj]! * sv;
+      }
+    }
+    nov[t] = Math.max(0, s);
+  }
+  return nov;
+}
+
+export function heatWindowFromEnergy(
+  energy: number[],
+  durationBars: number,
+  win = 16,
+  phrase = 8,
+): { inBars: number; outBars: number } {
+  const nBars = Math.max(1, Math.round(durationBars));
+  if (!energy.length || nBars < 4) return { inBars: 0, outBars: Math.max(8, nBars) };
+  const barE = energy.length === nBars ? energy : resampleToBars(energy, nBars);
+  const w = Math.min(Math.max(8, win), Math.max(8, nBars));
+  let best = 0;
+  let bestS = -Infinity;
+  const step = Math.min(phrase, 8);
+  for (let s = 0; s + Math.min(w, nBars) <= nBars; s += step) {
+    let sum = 0;
+    const end = Math.min(nBars, s + w);
+    for (let i = s; i < end; i++) sum += barE[i] ?? 0;
+    const score = sum / Math.max(1, end - s);
+    if (score > bestS) {
+      bestS = score;
+      best = s;
+    }
+  }
+  return { inBars: best, outBars: Math.min(nBars, best + w) };
+}
+
+/**
+ * Zehren/Yadati drop: Foote peaks on an 8-bar grid that pass salience
+ * (following 8 bars loud + bass-in vs the 8 before). Fallback = heat window.
+ */
+export function salienceDropBars(
+  barEnergy: number[],
+  barLow: number[],
+  novelty: number[],
+  phrase = 8,
+): number {
+  const n = barEnergy.length;
+  const heat = heatWindowFromEnergy(barEnergy, n, 16, phrase).inBars;
+  if (n < 12 || novelty.length !== n) return heat;
+  const maxN = Math.max(...novelty, 1e-9);
+  const maxE = Math.max(...barEnergy, 1e-9);
+  const maxL = Math.max(...barLow, 1e-9);
+  const raw: number[] = [];
+  for (let i = 2; i < n - 2; i++) {
+    if (novelty[i]! < 0.28 * maxN) continue;
+    let peak = true;
+    for (let k = i - 2; k <= i + 2; k++) {
+      if (k !== i && (novelty[k] ?? 0) > novelty[i]!) peak = false;
+    }
+    if (peak) raw.push(i);
+  }
+  const snapped = [
+    ...new Set(raw.map((p) => Math.round(p / phrase) * phrase)),
+  ].filter((p) => p >= phrase && p < n - 4);
+  const ok = snapped.filter((p) => {
+    const after = mean(barEnergy.slice(p, Math.min(n, p + 8)));
+    const before = mean(barEnergy.slice(Math.max(0, p - 8), p));
+    const afterL = mean(barLow.slice(p, Math.min(n, p + 8)));
+    return after >= 0.38 * maxE && after >= before * 0.92 && afterL >= 0.28 * maxL;
+  });
+  const pool = ok.length ? ok : snapped.length ? snapped : [heat];
+  return pool.reduce((best, p) => {
+    const a = mean(barEnergy.slice(p, Math.min(n, p + 16)));
+    const b = mean(barEnergy.slice(best, Math.min(n, best + 16)));
+    return a > b ? p : best;
+  });
+}
+
+function pushSection(
+  out: TrackAnalysis["sections"],
+  label: SectionLabel,
+  startBars: number,
+  endBars: number,
+  barSec: number,
+) {
+  if (endBars - startBars < 4) return;
+  out.push({
+    label,
+    startBars,
+    endBars,
+    startSec: startBars * barSec,
+    endSec: endBars * barSec,
+  });
+}
+
+/** Rekordbox-high / EDM-98 labels from energy shape around the measured drop. */
+function segmentEdm(
+  barEnergy: number[],
+  dropBars: number,
+  durationBars: number,
+  bpm: number,
+): TrackAnalysis["sections"] {
+  const n = Math.max(1, Math.round(durationBars));
+  const barSec = (60 / bpm) * 4;
+  const drop = Math.max(0, Math.min(n - 8, Math.round(dropBars / 8) * 8));
+  const meanE = mean(barEnergy);
+  const sections: TrackAnalysis["sections"] = [];
+
+  let buildStart = drop;
+  if (drop >= 16) {
+    const rise = mean(barEnergy.slice(drop - 8, drop)) - mean(barEnergy.slice(Math.max(0, drop - 16), drop - 8));
+    buildStart = rise > 0.04 ? drop - 16 : drop - 8;
+    pushSection(sections, "intro", 0, buildStart, barSec);
+    pushSection(sections, "build", buildStart, drop, barSec);
+  } else if (drop >= 8) {
+    pushSection(sections, "intro", 0, drop, barSec);
+  }
+
+  let dropEnd = Math.min(n, drop + 32);
+  let hole: number | null = null;
+  for (let b = drop + 8; b <= n - 8; b += 8) {
+    const local = mean(barEnergy.slice(b, b + 8));
+    if (local < meanE * 0.72 && local < 0.55) {
+      hole = b;
+      dropEnd = b;
+      break;
+    }
+  }
+  pushSection(sections, "drop", drop, dropEnd, barSec);
+  if (hole != null) {
+    let holeEnd = Math.min(n, hole + 16);
+    const rest = mean(barEnergy.slice(Math.min(n - 1, hole + 8), Math.min(n, hole + 16)));
+    if (rest > 0.7 && hole + 16 < n - 4) {
+      holeEnd = hole + 8;
+      pushSection(sections, "breakdown", hole, holeEnd, barSec);
+      pushSection(sections, "drop", holeEnd, Math.min(n, holeEnd + 24), barSec);
+      const tail = Math.min(n, holeEnd + 24);
+      if (tail < n - 4) pushSection(sections, "outro", tail, n, barSec);
+    } else {
+      pushSection(sections, "breakdown", hole, holeEnd, barSec);
+      if (holeEnd < n - 4) pushSection(sections, "outro", holeEnd, n, barSec);
+    }
+  } else if (dropEnd < n - 4) {
+    const tailE = mean(barEnergy.slice(Math.max(0, n - 8), n));
+    pushSection(sections, tailE < meanE * 0.9 ? "outro" : "drop", dropEnd, n, barSec);
+  }
+
+  if (!sections.length) {
+    pushSection(sections, drop < 8 ? "drop" : "intro", 0, n, barSec);
+  }
+  return sections;
+}
+
+function loudestDropSection(
+  sections: TrackAnalysis["sections"],
+  energy: number[],
+  durationBars: number,
+  dropBars?: number,
+): TrackAnalysis["sections"][number] | null {
+  if (dropBars != null) {
+    const hit =
+      sections.find((s) => s.label === "drop" && s.startBars <= dropBars && s.endBars > dropBars) ??
+      sections.find((s) => s.label === "drop");
+    if (hit) return hit;
+  }
+  const labeled = sections.filter((s) => s.label === "drop" || s.label === "chorus");
+  const pool = labeled.length
+    ? labeled
+    : sections.filter((s) => s.label !== "intro" && s.label !== "outro");
+  if (!pool.length || !energy.length) return null;
+  const score = (s: TrackAnalysis["sections"][number]) => {
+    const a = Math.floor((s.startBars / Math.max(durationBars, 1e-6)) * (energy.length - 1));
+    const b = Math.floor((s.endBars / Math.max(durationBars, 1e-6)) * (energy.length - 1));
+    return mean(energy.slice(Math.max(0, a), Math.max(a + 1, b + 1)));
+  };
+  return pool.reduce((best, s) => (score(s) > score(best) ? s : best));
 }
 
 type FrameBands = { flux: number; low: number; mid: number; high: number; chroma: Float32Array };
@@ -202,98 +454,6 @@ function alignGrid(flux: number[], fps: number, bpm: number) {
   return { beats, downbeats, phaseSec: bestPhase };
 }
 
-function snapBars(bars: number, phrase = 8) {
-  if (bars <= 0) return 0;
-  return Math.round(bars / phrase) * phrase;
-}
-
-function segmentSections(
-  energy: number[],
-  vocal: number[],
-  durationSec: number,
-  bpm: number,
-): TrackAnalysis["sections"] {
-  const barSec = (60 / bpm) * 4;
-  const durationBars = durationSec / barSec;
-  if (energy.length < 4) {
-    return [
-      {
-        label: "intro",
-        startBars: 0,
-        endBars: Math.max(8, durationBars),
-        startSec: 0,
-        endSec: durationSec,
-      },
-    ];
-  }
-
-  const meanE = mean(energy);
-  const novelty: number[] = [0];
-  for (let i = 1; i < energy.length; i++) {
-    novelty.push(Math.abs(energy[i]! - energy[i - 1]!) + Math.abs((vocal[i] ?? 0) - (vocal[i - 1] ?? 0)) * 0.5);
-  }
-  const novMean = mean(novelty);
-  const raw = [0];
-  for (let i = 2; i < novelty.length - 2; i++) {
-    if (novelty[i]! > novMean * 1.55 && i - raw[raw.length - 1]! > 3) raw.push(i);
-  }
-  raw.push(energy.length - 1);
-
-  // Convert to bars and snap to 8
-  const cuts = raw.map((i) => snapBars((i / (energy.length - 1)) * durationBars));
-  const uniq = [...new Set(cuts)].sort((a, b) => a - b);
-  if (uniq[0] !== 0) uniq.unshift(0);
-  const last = snapBars(durationBars) || durationBars;
-  if (uniq[uniq.length - 1]! < last - 4) uniq.push(last);
-
-  const merged: number[] = [0];
-  for (const c of uniq.slice(1)) {
-    if (c - merged[merged.length - 1]! >= 8) merged.push(c);
-  }
-  if (merged[merged.length - 1]! < last) {
-    if (last - merged[merged.length - 1]! >= 8) merged.push(last);
-    else merged[merged.length - 1] = last;
-  }
-
-  const sections: TrackAnalysis["sections"] = [];
-  for (let i = 0; i < merged.length - 1; i++) {
-    const startBars = merged[i]!;
-    const endBars = merged[i + 1]!;
-    const a = Math.floor((startBars / durationBars) * (energy.length - 1));
-    const b = Math.floor((endBars / durationBars) * (energy.length - 1));
-    const local = mean(energy.slice(a, Math.max(a + 1, b + 1)));
-    const voc = mean(vocal.slice(a, Math.max(a + 1, b + 1)));
-    const rel = (startBars + endBars) / 2 / Math.max(durationBars, 0.001);
-    const prevE = sections.length ? mean(energy.slice(Math.max(0, a - 4), a + 1)) : local;
-    sections.push({
-      label: labelSection(rel, local, meanE, voc, local - prevE, i === 0, i === merged.length - 2),
-      startBars,
-      endBars,
-      startSec: startBars * barSec,
-      endSec: endBars * barSec,
-    });
-  }
-  return sections;
-}
-
-function labelSection(
-  rel: number,
-  local: number,
-  meanE: number,
-  vocal: number,
-  rise: number,
-  isFirst: boolean,
-  isLast: boolean,
-): SectionLabel {
-  if (isFirst && (rel < 0.18 || local < meanE * 0.85)) return "intro";
-  if (isLast && (rel > 0.82 || local < meanE * 0.9)) return "outro";
-  if (local < meanE * 0.72) return "breakdown";
-  if (rise > 0.08 && local > meanE * 0.95) return "build";
-  if (local > meanE * 1.12) return vocal > 0.45 ? "chorus" : "drop";
-  if (vocal > 0.5) return "verse";
-  return local > meanE ? "drop" : "verse";
-}
-
 function buildWaveform(samples: Float32Array, sampleRate: number): WaveformPeaks {
   const targetPeaks = 512;
   const samplesPerPeak = Math.max(1, Math.floor(samples.length / targetPeaks));
@@ -371,34 +531,19 @@ function vocalRegionsFrom(
   return regions;
 }
 
-function inferGenre(bpm: number, brightness: number, energyMean: number, vocalLead: boolean): string {
-  if (bpm >= 160 && bpm <= 180) return "drum and bass";
-  if (bpm >= 138 && bpm <= 144 && energyMean > 0.55) return "dubstep";
-  if (bpm >= 145 && bpm <= 160) return "hard techno";
-  if (bpm >= 132 && bpm <= 150 && brightness < 0.55) return "techno";
-  if (bpm >= 128 && bpm <= 140 && brightness > 0.55) return "trance";
-  if (bpm >= 122 && bpm <= 132 && brightness > 0.4) return "tech house";
-  if (bpm >= 118 && bpm <= 126 && energyMean < 0.55) return "deep house";
-  if (bpm >= 118 && bpm <= 132) return "house";
-  if (bpm >= 85 && bpm <= 115) return vocalLead ? "hip-hop" : "downtempo";
-  if (bpm >= 70 && bpm < 85) return "downtempo";
-  return "unknown";
-}
-
-function inferMood(camelot: string, energyLevel: number, brightness: number): TrackMood {
-  const minor = camelot.endsWith("A");
-  if (energyLevel >= 8) return "driving";
-  if (!minor && brightness > 0.45) return "bright";
-  if (minor && energyLevel <= 5) return "dark";
-  return brightness > 0.4 ? "warm" : "dark";
-}
-
-function inferRole(energyLevel: number, vocalLead: boolean, dropShare: number): TrackRole {
-  if (energyLevel >= 8) return "peak";
-  if (energyLevel <= 3) return dropShare < 0.15 ? "opener" : "reset";
-  if (energyLevel <= 4) return "opener";
-  if (energyLevel <= 6) return vocalLead ? "bridge" : "builder";
-  return energyLevel >= 7 && dropShare > 0.2 ? "peak" : "builder";
+/**
+ * Timbre is the ONLY mood-adjacent thing the DSP can honestly claim: it is a
+ * spectral measurement (high-band ratio + energy), never a harmonic-mode
+ * guess. "Dark" here means low-passed and low-mid heavy — a timbre, not an
+ * emotion. Emotional mood (euphoric, melancholy…) is agent-curated via
+ * tag_track; the detector stopped guessing it because minor-key ⇏ dark and
+ * BPM-bucket ⇏ genre were actively misguiding the composer.
+ */
+function inferTimbre(brightness: number, energyLevel: number): "bright" | "dark" | "warm" {
+  if (energyLevel >= 8) return "bright";
+  if (brightness >= 0.45) return "bright";
+  if (brightness < 0.3) return "dark";
+  return "warm";
 }
 
 export function analyzePcm(
@@ -418,6 +563,10 @@ export function analyzePcm(
   const buckets = 96;
   const energy: number[] = [];
   const vocal: number[] = [];
+  const lowBand: number[] = [];
+  const midBand: number[] = [];
+  const highBand: number[] = [];
+  const chromaByBucket: Float32Array[] = [];
   const chromaSum = new Float32Array(12);
   let brightAcc = 0;
   const keyUntil = Math.min(frames.length, Math.floor(fps * 75));
@@ -427,20 +576,31 @@ export function analyzePcm(
     const z = Math.floor(((b + 1) / buckets) * frames.length);
     let e = 0;
     let v = 0;
+    let lowAcc = 0;
+    let midAcc = 0;
+    let highAcc = 0;
     let n = 0;
+    const bucketChroma = new Float32Array(12);
     for (let i = a; i < z; i++) {
       const f = frames[i];
       if (!f) continue;
       const tot = f.low + f.mid + f.high + 1e-9;
       e += tot;
-      // Vocal: mid-strong, low not dominating (kills drop=vocal false positive)
+      lowAcc += f.low;
+      midAcc += f.mid;
+      highAcc += f.high;
       const midRatio = f.mid / tot;
       const lowRatio = f.low / tot;
       v += midRatio > 0.38 && lowRatio < 0.42 ? midRatio : 0;
+      for (let c = 0; c < 12; c++) bucketChroma[c]! += f.chroma[c]!;
       n++;
     }
     energy.push(n ? e / n : 0);
     vocal.push(n ? v / n : 0);
+    lowBand.push(n ? lowAcc / n : 0);
+    midBand.push(n ? midAcc / n : 0);
+    highBand.push(n ? highAcc / n : 0);
+    chromaByBucket.push(bucketChroma);
   }
 
   for (let i = 0; i < keyUntil; i++) {
@@ -452,26 +612,64 @@ export function analyzePcm(
 
   const maxE = Math.max(...energy, 1e-6);
   const energyNorm = energy.map((e) => e / maxE);
+  const maxL = Math.max(...lowBand, 1e-6);
+  const maxM = Math.max(...midBand, 1e-6);
+  const maxH = Math.max(...highBand, 1e-6);
+  const lowNorm = lowBand.map((e) => e / maxL);
+  const midNorm = midBand.map((e) => e / maxM);
+  const highNorm = highBand.map((e) => e / maxH);
+  const chromaCurve = chromaByBucket.map((bucket) => {
+    const m = Math.max(...bucket, 1e-9);
+    return Array.from(bucket, (v) => Number((v / m).toFixed(3)));
+  });
   const brightness = frames.length ? brightAcc / Math.max(1, keyUntil) : 0.3;
-  const key = estimateKey(chromaSum);
+  const introKey = estimateKey(chromaSum);
   const durationBars = (durationSec * bpm) / 60 / 4;
-  const sections = segmentSections(energyNorm, vocal, durationSec, bpm);
+  const nBars = Math.max(1, Math.round(durationBars));
+  const barEnergy = resampleToBars(energyNorm, nBars);
+  const barLow = resampleToBars(lowNorm, nBars);
+  const seq = energyNorm.map((e, i) => [e, lowNorm[i] ?? 0, midNorm[i] ?? 0, highNorm[i] ?? 0]);
+  const barsPerBucket = durationBars / Math.max(1, buckets);
+  const kernelHalf = Math.max(2, Math.round(8 / Math.max(0.25, barsPerBucket) / 2));
+  const novelty = footeNovelty(seq, kernelHalf);
+  const noveltyBars = resampleToBars(novelty, nBars);
+  const dropBars = salienceDropBars(barEnergy, barLow, noveltyBars);
+  const heat = heatWindowFromEnergy(barEnergy, nBars);
+  const sections = segmentEdm(barEnergy, dropBars, durationBars, bpm);
+  const dropSection = loudestDropSection(sections, energyNorm, durationBars, dropBars);
+  let key = introKey;
+  let keyWindow: "intro" | "drop" = "intro";
+  if (dropSection && frames.length) {
+    const barSec = (60 / bpm) * 4;
+    const startSec = dropSection.startSec;
+    const endSec = Math.min(dropSection.endSec, startSec + barSec * 16);
+    const from = Math.floor(startSec * fps);
+    const to = Math.ceil(endSec * fps);
+    if (to - from >= fps * 4) {
+      const dropKey = estimateKey(sumChroma(frames, from, to));
+      if (dropKey.confidence >= introKey.confidence - 0.05) {
+        key = dropKey;
+        keyWindow = "drop";
+      }
+    }
+  }
+  key = { ...key, window: keyWindow, profile: "edma" };
   const waveform = buildWaveform(mono, targetRate);
   const vocalRegions = vocalRegionsFrom(vocal, durationSec, bpm);
   const vocalLead =
     vocalRegions.reduce((s, r) => s + (r.endBars - r.startBars), 0) / Math.max(1, durationBars) > 0.18;
   const energyMean = mean(energyNorm);
-  const dropShare =
-    sections
-      .filter((s) => s.label === "drop" || s.label === "chorus")
-      .reduce((s, x) => s + Math.max(0, x.endBars - x.startBars), 0) / Math.max(1, durationBars);
-  const bpmNorm = Math.min(1, Math.max(0, (bpm - 110) / 50));
+  const heatMean = mean(barEnergy.slice(heat.inBars, Math.max(heat.inBars + 1, heat.outBars)));
+  const peakE = Math.max(...barEnergy, 0);
   const energyLevel = Math.round(
-    1 + Math.min(1, Math.max(0, energyMean * 0.4 + dropShare * 0.25 + bpmNorm * 0.2 + brightness * 0.15)) * 9,
+    1 +
+      Math.min(
+        1,
+        Math.max(0, peakE * 0.45 + brightness * 0.25 + heatMean * 0.2 + energyMean * 0.1),
+      ) *
+        9,
   );
-  const genreHint = inferGenre(bpm, brightness, energyMean, vocalLead);
-  const mood = inferMood(key.camelot, energyLevel, brightness);
-  const suggestedRole = inferRole(energyLevel, vocalLead, dropShare);
+  const timbre = inferTimbre(brightness, energyLevel);
 
   return {
     bpm,
@@ -484,12 +682,16 @@ export function analyzePcm(
     energy: energyNorm,
     energyMean,
     energyLevel,
-    genreHint,
-    mood,
+    brightness: Number(brightness.toFixed(3)),
+    timbre,
     vocalLead,
-    suggestedRole,
     vocalRegions,
     waveform,
+    chromaCurve,
+    dropBars,
+    heatInBars: heat.inBars,
+    heatOutBars: heat.outBars,
+    detector: "salience-v1",
     analyzedAt: Date.now(),
   };
 }

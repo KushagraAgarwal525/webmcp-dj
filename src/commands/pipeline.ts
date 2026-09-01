@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import type { Command, CommandSource, DispatchedCommand } from "../types/commands";
 import type { DeckId, SetDoc } from "../types/setdoc";
-import { applyCommand, createInitialDoc, normalizeDoc } from "./applyCommand";
+import {
+  applyCommand,
+  createInitialDoc,
+  freezeRuntimeFlags,
+  normalizeDoc,
+} from "./applyCommand";
 import { persistSetDoc } from "../storage/db";
 
 const MAX_HISTORY = 100;
@@ -85,8 +90,19 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 function schedulePersist(doc: SetDoc) {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
-    void persistSetDoc(doc);
+    void persistSetDoc(freezeRuntimeFlags(doc));
   }, 400);
+}
+
+function transportUnchanged(a: TransportState, b: TransportState): boolean {
+  if (a.setPlaying !== b.setPlaying || a.entryIndex !== b.entryIndex) return false;
+  if (Math.abs(a.setPositionBars - b.setPositionBars) > 1e-6) return false;
+  for (const id of ["A", "B", "C", "D"] as DeckId[]) {
+    if (Math.abs((a.deckPlayheads[id] ?? 0) - (b.deckPlayheads[id] ?? 0)) > 1e-4) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export const useSetStore = create<SetStore>((set, get) => ({
@@ -113,6 +129,8 @@ export const useSetStore = create<SetStore>((set, get) => ({
 
     const changed = next.version !== previous.version || next !== previous;
     if (!changed) return dispatched;
+
+    const ephemeral = source === "system";
 
     const toast: Toast | null =
       source === "agent"
@@ -149,11 +167,11 @@ export const useSetStore = create<SetStore>((set, get) => ({
       }
       return {
         doc: next,
-        past: [...state.past.slice(-(MAX_HISTORY - 1)), previous],
-        future: [],
+        past: ephemeral ? s.past : [...state.past.slice(-(MAX_HISTORY - 1)), previous],
+        future: ephemeral ? s.future : [],
         lastCommand: dispatched,
-        activity: describeCommand(command),
-        toasts: toast ? [...state.toasts.slice(-4), toast] : state.toasts,
+        activity: ephemeral ? s.activity : describeCommand(command),
+        toasts: toast ? [...s.toasts.slice(-4), toast] : s.toasts,
         transport,
       };
     });
@@ -164,7 +182,7 @@ export const useSetStore = create<SetStore>((set, get) => ({
         });
       });
     }
-    schedulePersist(next);
+    if (!ephemeral) schedulePersist(next);
     return dispatched;
   },
 
@@ -182,15 +200,17 @@ export const useSetStore = create<SetStore>((set, get) => ({
   },
 
   setTransport: (partial) =>
-    set((s) => ({
-      transport: {
+    set((s) => {
+      const next: TransportState = {
         ...s.transport,
         ...partial,
         deckPlayheads: partial.deckPlayheads
           ? { ...s.transport.deckPlayheads, ...partial.deckPlayheads }
           : s.transport.deckPlayheads,
-      },
-    })),
+      };
+      if (transportUnchanged(s.transport, next)) return s;
+      return { transport: next };
+    }),
 
   undo: () => {
     const { past, doc, future } = get();

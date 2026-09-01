@@ -4,7 +4,7 @@ import type { DeckId, FxType } from "../types/setdoc";
 import { RotaryKnob } from "./controls/RotaryKnob";
 import { VerticalFader } from "./controls/VerticalFader";
 import { HardwareButton } from "./controls/HardwareButton";
-import { LevelMeter } from "./controls/LevelMeter";
+import { LiveLevelMeter } from "./controls/LevelMeter";
 
 const FX_TYPES: FxType[] = ["off", "delay", "reverb", "echo"];
 
@@ -13,13 +13,7 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
   const fxSend = useSetStore((s) => s.doc.decks[deck].fxSend);
   const cue = useSetStore((s) => s.doc.mixer.channels[deck].cue);
   const hasTrack = useSetStore((s) => Boolean(s.doc.decks[deck].trackId));
-  const playing = useSetStore((s) => s.doc.decks[deck].playing);
-  const setPlaying = useSetStore((s) => s.transport.setPlaying);
   const dispatch = useSetStore((s) => s.dispatch);
-
-  const level = hasTrack
-    ? Math.min(1, ch.fader * (playing || setPlaying ? 0.75 : 0.2) + 0.05)
-    : 0;
 
   return (
     <div className="djm-channel">
@@ -93,7 +87,7 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
         }
       />
       <div className="djm-fader-row">
-        <LevelMeter level={level} height={120} />
+        <LiveLevelMeter deck={deck} height={120} />
         <VerticalFader
           value={ch.fader}
           min={0}
@@ -112,6 +106,7 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
         onClick={() =>
           dispatch({ type: "mixer.setCue", deck, enabled: !cue })
         }
+        title="Cue to master (solos this channel while any Cue is on)"
       >
         Cue
       </HardwareButton>

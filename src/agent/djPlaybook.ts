@@ -1,9 +1,11 @@
 /** Facts for tools / booth. Not a script. The DJ (human or agent) picks the join. */
 
 export const TRANSITION_RECIPES = [
+  "tease_slam",
   "drop_swap",
   "double_drop",
   "power_cut",
+  "air_cut",
   "build_cut",
   "bass_swap",
   "eq_swap",
@@ -14,6 +16,7 @@ export const TRANSITION_RECIPES = [
   "backspin",
   "hook_layer",
   "half_bridge",
+  "tempo_ride",
   "power_block",
 ] as const;
 
@@ -84,11 +87,17 @@ export const DJ_PLAYBOOK_REFS = {
     "64 downtempo ↔ 128 house",
   ],
   recipes: {
+    tease_slam: {
+      type: "tease_slam",
+      bars: "8–16",
+      compiles:
+        "The chop default — take the outgoing record INTO the incoming one. TEASE: the incoming build bleeds in under the outgoing (LP-filtered, bass killed, fader low, xfader drifting off the rail). BUILD: incoming opens, outgoing HP-rises, FX send swells, the performer stutters a 1→0.5 loop roll on the outgoing's last 2 bars, and a tempo lane rides outBPM→inBPM across the whole window when Δ>3 (authored by prepare_set/apply_transition_recipe — verify demands it). THE 1: bass swap + xfader snap + echo throw tail ringing over the incoming drop. Parks incoming at drop−bars so the drop lands exactly on the commit; outgoing rides its drop phrase, then leaves.",
+    },
     drop_swap: {
       type: "drop_swap",
       bars: "8–16",
       compiles:
-        "Incoming isolated; mids/highs sneak; outgoing low dies on the 1; xfader commits. No send FX. Parks incoming at drop−N, outgoing leave on its drop.",
+        "Incoming isolated through the build; hats sneak; mids stay down while the outgoing line finishes. Bass + xfader on the incoming 1 (8 bars in when overlap is 16). Then peel outgoing over the rest. Parks incoming at drop−8, outgoing after the line plus the peel.",
     },
     double_drop: {
       type: "double_drop",
@@ -100,6 +109,12 @@ export const DJ_PLAYBOOK_REFS = {
       bars: "1",
       compiles: "Xfader cut on the 1. Parks incoming on its drop.",
     },
+    air_cut: {
+      type: "air_cut",
+      bars: "1–4",
+      compiles:
+        "Boom–pause–SLAM: LP suck-out on the outgoing's last bars, hard kill on the 8, one bar of dead air, incoming cold from its drop. No shared clock, no FX — the silence is the effect. Parks incoming on its drop, outgoing on its safe leave.",
+    },
     build_cut: {
       type: "build_cut",
       bars: "8–16",
@@ -108,58 +123,102 @@ export const DJ_PLAYBOOK_REFS = {
     bass_swap: { type: "blend", bars: "8–16", compiles: "Outgoing low dies mid-overlap; incoming low opens after." },
     eq_swap: { type: "eq_swap", bars: "8–24", compiles: "Bass swap plus mid handoff." },
     filter_sweep: { type: "filter_sweep", bars: "8–24", compiles: "Outgoing filter close, incoming bass dead until the 1. No FX." },
-    echo_out: { type: "echo_out", bars: "4–8", compiles: "Send/FX tail, outgoing fader out. A hole you meant." },
+    echo_out: { type: "echo_out", bars: "4–8", compiles: "Echo-THROW, not a fade: dry holds full while the send swells through the phrase, the last hook fills the delay, fader CUTS on the 1 and the buffer rings through the air. Incoming is not on the clock (overlap 0, 1-bar air). Parks incoming on its drop/heat at native BPM — never bar 0. No tempo ramp." },
     loop_out: { type: "loop_out", bars: "4", compiles: "Hold a loop, then cut." },
     loop_roll: { type: "loop_roll", bars: "4", compiles: "2→1→0.5 then cut." },
-    backspin: { type: "backspin", bars: "1", compiles: "Rewind outgoing, snap to incoming 1." },
+    backspin: {
+      type: "backspin",
+      bars: "1",
+      compiles:
+        "Outgoing stays loud, highpass + delay throw, playhead rewinds then xfader-slams to the incoming 1. No shared clock — each deck native BPM.",
+    },
     hook_layer: { type: "hook_layer", bars: "8–16", compiles: "Outgoing mid stays; low/high die. EQ stand-in for an acapella." },
-    half_bridge: { type: "echo_out", bars: "4–8", compiles: "Echo-shaped exit plus tempo snap when BPM ratio is ~2:1." },
+    half_bridge: { type: "echo_out", bars: "4–8", compiles: "Same leave as echo_out when BPM is ~2:1. No shared clock. Incoming native." },
+    tempo_ride: {
+      type: "tempo_ride",
+      bars: "16",
+      compiles:
+        "For ridable BPM gaps (6–10%): both decks ramp from the outgoing BPM to the incoming BPM across a 16-bar isolator overlap — keylock ON so pitch stays. Commit (bass swap) on the incoming drop 8 bars in, then the outgoing peels while the ride finishes. Needs a tempo lane; verify demands it. Past 10% the ride is a stretch — slam or throw instead.",
+    },
     power_block: { type: "cut", bars: "1", compiles: "1-bar cuts; pair with short trims." },
   },
 } as const;
 
-const FACTS = `BananaLabs compiles the join you pick. It does not pick the join.
+const FACTS = `BananaLabs compiles the join you pick. Default grammar is CHOP — 16–32 bar heat clips, sudden entries at build/drop, never radio intros.
 
-You choose: replace the drop (drop_swap / power_cut), stack both drops (double_drop), blend (bass_swap / eq_swap / filter_sweep), FX hole (echo_out), or hand-roll automation.
+SET = INTRO → UP+ → DROP → [DOWN] → DROP+ → OUTRO
+Per-track parts: intro unused at peak, up 8–16 (build), drop 16–32 (the hook), down 8–16 RESET, outro unused. Default join: tease_slam — never a cold switch; loop_roll / backspin / power_cut for variety and no-drop cases. No two identical slams in a row. RESET on 4+ clips.
 
-get_mix_points includes drop, 8/16 bars before drop, breakdown, mix-in/out.
-apply_transition_recipe compiles that gesture. Drop recipes also park incoming in_bars at drop−N and outgoing out_bars on the outgoing drop.
-preview_join is an ear (bass / mid / vocal / key / tempo / drop positions). It does not pick a recipe.
-plan_set_arc is track order + windows + drop cues. Joins stay unset (1-bar cut placeholder).
+Chop is the default. Blend + echo only when intent is chill / deep / warm-up / smooth (or you override a join). Radio edits in this crate have no 32-bar drum intros — bar-0 + echo IS the fade. prepare_set parks every clip on drop/heat, never bar 0.
+
+You choose: tease the next record in and slam it (tease_slam — the default), replace the drop (drop_swap), stack both drops (double_drop), blend (bass_swap / eq_swap / filter_sweep), throw and leave (echo_out), rewind slam (backspin), roll and cut (loop_roll), or hand-roll automation. The engine owns bar math.
+
+A transition is a handoff, not a switch: the crowd should HEAR the next record arriving (filtered tease of its build), feel the pitch ride (tempo lane across the window), brace (loop roll + HP rise + FX swell), then get the drop on the 1. Cold cut / air_cut / backspin share no clock and are the exception — half/double-time records, or deliberate shock.
+
+Far BPM: tease_slam rides ANY same-direction gap — the tempo lane ramps both decks across the tease window (keylock on, so pitch stays musical). Only 2:1 clocks (half/double) still air-slam. Slam joins (cut / backspin / air_cut) share no clock.
+
+Same-BPM label clashes in blend grammar can hole-park; in chop the tease is LP-filtered and bassless, so a label clash is mostly masked — on a measured clash, shorten the tease to 8. A closer lands on its drop, never from silence.
+
+Chop grammar (the app refuses illegal leaves — still pick the 1):
+- Commit only on an 8/16-bar 1.
+- Default in_bars = measured drop / heat window, never 0.
+- Play length 16–32 bars. Do not run the full file.
+- tease_slam parks incoming at drop−bars (the build teases in; the drop lands on the commit).
+- power_cut / backspin / air_cut park incoming on the drop.
+- Drop-swap (blend only): cue incoming at drop−8. Do not park incoming on its drop.
+- Never share a set clock on a 2:1 tempo relation.
+
+get_mix_points includes measured drop (salience), 8/16 before that drop, vocal_end, safe_leave, breakdown, mix-in/out.
+apply_transition_recipe compiles that gesture.
+preview_join is an ear. Isolator recipes are not failed for raw-file bass; slam joins are not failed for far BPM; tease_slam carries its own tempo ramp.
+plan_set_arc is track order + heat windows + drop cues. Joins stay unset (1-bar cut placeholder).
+prepare_set writes a first playable arrangement: chop formula, heat clips, tease_slam joins. Empty intent infers the night as chop. Intent "smooth blend" / chill / warm-up switches grammar. You can still rewrite any join.
 verify_set ready:true means no broken automation. Warns are observations.
 
-Camelot, BPM lanes, and compile strings are in refs. Do not invent numbers.`;
+Camelot, BPM lanes, and compile strings are in refs. Do not invent numbers.
+
+Labels: the detector measures bpm, energy, brightness, chroma, dropBars, heat window. It does not guess taste. mood and genre on cards are MusicBrainz or tag_track — never DSP. A minor key does not mean dark. A BPM bucket does not mean a genre. Do not display timbre as mood. Roles are craft-only (slots at compose time). Trust measured fields; curate the semantic ones.`;
 
 const RECIPES = `What each recipe compiles (not when to use it):
 
-drop_swap     isolator swap on the 1 — incoming bass dead through the shared phrase
+tease_slam    THE chop default: filtered tease of the incoming build under the outgoing, tempo ride across the window, roll + HP + FX swell, slam on the 1 with an echo-throw tail
+drop_swap     isolator: incoming bass/mids dead through the build, swap on the 1, peel
 double_drop   both drops on the same 1
 power_cut     cut on the incoming 1
+air_cut       suck-out, one bar of dead air, slam the incoming drop — no shared clock
 build_cut     pictured drop + send FX
 bass_swap     one-bass blend
 eq_swap       bass + mid handoff
 filter_sweep  filter tension, snap on the 1, no FX
-echo_out      send tail / hole
+echo_out      echo-throw leave — dry holds, delay fills, cut on the 1, ring through the air
 loop_out      hold then cut
-loop_roll     2→1→0.5 then cut
-backspin      rewind then snap
+loop_roll     incoming teases in filtered, 2→1→0.5 roll, then cut
+backspin      rewind (loud, delay throw) then xfader slam — native BPM each side
 hook_layer    outgoing mid over a new bed
 half_bridge   echo-shaped exit + tempo to half/double
+tempo_ride    6–10% BPM gap: ramp both decks under keylock, isolator commit on the drop, peel
 power_block   1-bar cuts
 
 Cue math you apply yourself (or let apply_transition_recipe park it):
-incoming drop D, overlap N → in_bars = D − N
-outgoing drop E → out_bars = E
-power_cut / backspin → in_bars = D`;
+incoming drop D → in_bars = D − 8 (the build, even when overlap is 16)
+tease_slam → in_bars = D − bars (the tease IS the build; the drop lands on the commit)
+outgoing leave = safe_leave + peel (peel = overlap − 8)
+power_cut / backspin / air_cut → in_bars = D
+tempo_ride parks like drop_swap (in = D − 8) and adds the tempo lane itself`;
 
 const VERIFY = `verify_set errors (broken mix — fix the automation):
 - double_bass on a blend-class join with no bass kill
 - echo_out / build_cut with no FX arm
-- |ΔBPM|>3 and no tempo lane
+- |ΔBPM|>3 and no tempo lane on a shared-clock join (not echo_out / air_cut / cut / backspin — those slams share no clock; tempo_ride AND tease_slam REQUIRE the lane — prepare_set / apply_transition_recipe author it)
+- tempo_ride without keylock, or on a ≤3% gap (drop_swap covers that) — warns
+- mid_vocal_leave (xfader commit inside a vocal region)
+- key_unknown_pad (confidence < 0.55 on an 8+ bar pad blend — not an isolator drop-swap)
+- key_overlap_too_long / key_clash on a pad longer than the Camelot cap
+- unknown_transition (a recipe name stored as a type — re-apply via apply_transition_recipe)
 - transition_too_long past the engine cap
 - too_short (need 2+ tracks)
 
-warns are observations (phrase, vocals, energy shape, key on a long pad blend). Keep them if you meant it.`;
+Slam joins (cut / backspin / air_cut) are exempt from key caps and ΔBPM ramps by design; tease_slam is exempt from raw-window clash caps (the tease is filtered/bassless) but never from the ramp. warns are observations (phrase, both-sides vocals, energy shape). Keep them if you meant it.`;
 
 const CHAPTERS: Record<Exclude<PlaybookTopic, "all">, string> = {
   recipes: RECIPES,

@@ -204,12 +204,15 @@
 }
 
 .jog {
+  /* Always a true circle — never flex-stretch into an oval */
   position: relative;
-  width: min(100%, var(--jog-size, 220px));
-  aspect-ratio: 1;
+  flex: none;
+  width: var(--jog-fit, min(100%, 220px));
+  height: var(--jog-fit, min(100%, 220px));
+  aspect-ratio: 1 / 1;
   margin: 0 auto;
-  flex: 0 1 auto;
-  min-height: 0;
+  flex-shrink: 0;
+  border-radius: 50%;
 }
 
 .jog-outer {

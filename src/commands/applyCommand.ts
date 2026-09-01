@@ -9,6 +9,10 @@ import type {
 } from "../types/setdoc";
 import { createEmptySetDoc } from "../types/setdoc";
 import { quantizeBars } from "../audio/quantize";
+import {
+  defaultTransitionBars,
+  resolveTransition,
+} from "../set/timeline";
 
 function cloneLane(lane: AutomationLane): AutomationLane {
   return { ...lane };
@@ -383,14 +387,25 @@ export function applyCommand(doc: SetDoc, command: Command): SetDoc {
       const durationBars = track.analysis?.durationBars ?? 32;
       const entries = [...doc.arrangement];
       const index = clamp(command.index, 0, entries.length);
+      // Recipe aliases (power_cut, bass_swap, half_bridge…) resolve to types;
+      // anything else is refused as a cut rather than silently stored.
+      const resolved =
+        command.transition != null ? resolveTransition(command.transition) : null;
+      if (command.transition != null && !resolved) {
+        console.warn(
+          `[set.insert] unknown transition "${String(command.transition)}" — inserting as cut`,
+        );
+      }
+      const type: TransitionType =
+        resolved?.type ?? (command.transition == null ? "blend" : "cut");
       entries.splice(index, 0, {
         id: crypto.randomUUID(),
         trackId: command.trackId,
         inBars: command.inBars ?? 0,
         outBars: command.outBars ?? durationBars,
         transition: {
-          type: (command.transition as TransitionType) ?? "blend",
-          bars: command.bars ?? 8,
+          type,
+          bars: command.bars ?? defaultTransitionBars(type),
         },
       });
       next.arrangement = entries;
@@ -439,10 +454,18 @@ export function applyCommand(doc: SetDoc, command: Command): SetDoc {
       const entries = [...doc.arrangement];
       const entry = entries[command.index];
       if (!entry) return doc;
+      const resolved =
+        command.transition != null ? resolveTransition(command.transition) : null;
+      if (!resolved) {
+        console.warn(
+          `[set.setTransition] refusing unknown transition "${String(command.transition)}"`,
+        );
+        return doc;
+      }
       entries[command.index] = {
         ...entry,
         transition: {
-          type: command.transition,
+          type: resolved.type,
           bars: command.bars ?? entry.transition.bars,
         },
       };
@@ -619,6 +642,7 @@ export function normalizeDoc(doc: SetDoc): SetDoc {
     decks[id] = {
       ...base.decks[id],
       ...d,
+      playing: false,
       loopInBars: d.loopInBars ?? null,
       loopBars: d.loopBars ?? null,
       fxSend: d.fxSend ?? 0,
@@ -642,6 +666,21 @@ export function normalizeDoc(doc: SetDoc): SetDoc {
     },
     record: { ...base.record, ...(doc.record ?? {}), recording: false },
   };
+}
+
+/** Strip runtime playback flags before writing IndexedDB (never restore a spinning deck). */
+export function freezeRuntimeFlags(doc: SetDoc): SetDoc {
+  const decks = { ...doc.decks };
+  let dirty = false;
+  for (const id of ["A", "B", "C", "D"] as DeckId[]) {
+    if (!decks[id]?.playing) continue;
+    decks[id] = { ...decks[id], playing: false };
+    dirty = true;
+  }
+  if (doc.record.recording) {
+    return { ...doc, decks, record: { ...doc.record, recording: false } };
+  }
+  return dirty ? { ...doc, decks } : doc;
 }
 
 export function createInitialDoc(): SetDoc {

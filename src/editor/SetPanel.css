@@ -21,6 +21,41 @@
   border-bottom: 1px solid var(--line);
 }
 
+.set-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: end;
+  margin-top: 6px;
+}
+
+.set-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.set-edit input,
+.set-edit select {
+  height: 22px;
+  min-width: 44px;
+  max-width: 110px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.set-edit select {
+  max-width: 118px;
+}
+
 .set-recipe {
   border: 1px solid var(--line);
   background: transparent;
@@ -47,8 +82,22 @@
   flex: 1;
 }
 
-.set-recipe-row select {
+.set-recipe-row select,
+.set-recipe-row input {
   font-size: 12px;
+}
+
+.set-intent {
+  flex: 2;
+}
+
+.set-intent input {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .set-verify {

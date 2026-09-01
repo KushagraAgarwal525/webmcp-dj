@@ -22,6 +22,11 @@ export function JogWheel({
   const angle = (playheadBars / 2) * 360;
   const barSec = bpm && bpm > 0 ? (60 / bpm) * 4 : 2;
   const revSec = barSec * 2;
+  // While spinning, leave --jog-angle alone so the CSS animation isn't restarted.
+  const ringStyle = {
+    "--jog-duration": `${Math.max(0.4, revSec)}s`,
+    ...(playing ? {} : { "--jog-angle": `${angle}deg` }),
+  } as CSSProperties;
 
   return (
     <div
@@ -31,12 +36,7 @@ export function JogWheel({
       <div className="jog-outer">
         <div
           className={`jog-ring${playing ? " is-spinning" : ""}`}
-          style={
-            {
-              "--jog-angle": `${angle}deg`,
-              "--jog-duration": `${Math.max(0.4, revSec)}s`,
-            } as CSSProperties
-          }
+          style={ringStyle}
         />
         <div className="jog-face">
           <span className="jog-deck">{deck}</span>

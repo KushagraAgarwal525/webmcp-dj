@@ -1,8 +1,12 @@
 import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import processorUrl from "@soundtouchjs/audio-worklet/processor?url";
-import { readAudioBlob } from "../storage/opfs";
 import type { DeckId, SetDoc } from "../types/setdoc";
 import { useSetStore } from "../commands/pipeline";
+import { getAudioBuffer } from "./bufferCache";
+import { BACKSPIN_REWIND_BARS } from "../set/timeline";
+import { reversedSlice } from "./reverseSlice";
+
+type FilterMode = "allpass" | "lowpass" | "highpass";
 
 type DeckNodes = {
   gain: GainNode;
@@ -11,6 +15,7 @@ type DeckNodes = {
   eqMid: BiquadFilterNode;
   eqHigh: BiquadFilterNode;
   filter: BiquadFilterNode;
+  filterMode: FilterMode;
   buffer: AudioBuffer | null;
   loadedTrackId: string | null;
   source: AudioBufferSourceNode | null;
@@ -22,6 +27,10 @@ type DeckNodes = {
   rate: number;
   nativeBpm: number;
   useStretch: boolean;
+  analyser: AnalyserNode;
+  levelBuf: Uint8Array<ArrayBuffer>;
+  /** Vinyl rewind: a reversed slice is playing; skip forward seeks / rate writes. */
+  reversing: boolean;
 };
 
 class AudioEngine {
@@ -41,6 +50,7 @@ class AudioEngine {
   private decks: Record<DeckId, DeckNodes> | null = null;
   private unsub: (() => void) | null = null;
   private loopRaf = 0;
+  private loopWatchOn = false;
   private syncRunning = false;
   private syncQueued = false;
   private workletReady = false;
@@ -49,9 +59,11 @@ class AudioEngine {
     { trackId: string | null; playing: boolean; positionBars: number }
   > | null = null;
   private wasRecording = false;
+  /** Last values pushed to each channel's AudioParams — dezipper + skip identical frames. */
+  private appliedCh: Partial<Record<DeckId, Record<string, number>>> = {};
 
   dispose() {
-    cancelAnimationFrame(this.loopRaf);
+    this.disarmLoopWatch();
     this.unsub?.();
     this.unsub = null;
     void this.ctx?.close();
@@ -108,6 +120,8 @@ class AudioEngine {
       C: this.makeDeck(ctx),
       D: this.makeDeck(ctx),
     };
+    this.appliedCh = {};
+    this.appliedFx = {};
 
     try {
       await SoundTouchNode.register(ctx, processorUrl);
@@ -118,7 +132,10 @@ class AudioEngine {
     }
 
     this.unsub = useSetStore.subscribe((state, prev) => {
-      if (state.doc !== prev.doc) this.requestSync();
+      if (state.doc !== prev.doc) {
+        if (needsTransportSync(prev.doc, state.doc)) this.requestSync();
+        else this.applyMixerGraph(state.doc);
+      }
       if (
         state.lastCommand &&
         state.lastCommand !== prev.lastCommand &&
@@ -128,8 +145,86 @@ class AudioEngine {
       }
     });
 
-    this.armLoopWatch();
     return ctx;
+  }
+
+  getCurrentTime() {
+    return this.ctx?.currentTime ?? 0;
+  }
+
+  /** Drift correction: restart the playing buffer without a command. */
+  seekPlayingTo(deck: DeckId, positionBars: number) {
+    if (this.decks?.[deck]?.reversing) return;
+    const d = useSetStore.getState().doc.decks[deck];
+    this.seekPlaying(deck, positionBars, d);
+  }
+
+  isReversing(deck: DeckId): boolean {
+    return Boolean(this.decks?.[deck]?.reversing);
+  }
+
+  /**
+   * Play a reversed PCM slice once (no SoundTouch). Restarting the keylock
+   * worklet every frame is silent; this is actual rewind audio.
+   */
+  startReverse(
+    deck: DeckId,
+    fromBars: number,
+    windowSec: number,
+    minBars = 0,
+    rewindBars = BACKSPIN_REWIND_BARS,
+  ) {
+    const nodes = this.decks?.[deck];
+    if (!nodes || !this.ctx || !nodes.buffer) return;
+    if (nodes.reversing) return;
+
+    const barSec = (60 / Math.max(1, nodes.nativeBpm)) * 4;
+    const originBars = Math.max(minBars, fromBars);
+    const startBars = Math.max(minBars, originBars - rewindBars);
+    const sliceSec = Math.max(0.12, (originBars - startBars) * barSec);
+    const slice = reversedSlice(this.ctx, nodes.buffer, startBars * barSec, sliceSec);
+    const dur = Math.max(0.08, windowSec);
+    const meanRate = slice.duration / dur;
+
+    nodes.reversing = true;
+    this.haltSource(deck);
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = slice;
+    src.connect(nodes.eqLow);
+    const t = this.ctx.currentTime;
+    const fromRate = Math.max(0.7, meanRate * 0.55);
+    const toRate = Math.max(fromRate, meanRate * 1.45);
+    src.playbackRate.setValueAtTime(fromRate, t);
+    src.playbackRate.linearRampToValueAtTime(toRate, t + dur);
+    src.start(0);
+
+    nodes.source = src;
+    nodes.stretch = null;
+    nodes.useStretch = false;
+    nodes.reversing = true;
+    nodes.playing = true;
+    nodes.rate = fromRate;
+    nodes.startedAt = t;
+    nodes.offsetSec = startBars * barSec;
+    if (this.lastDeckSnap) {
+      this.lastDeckSnap[deck] = {
+        trackId: useSetStore.getState().doc.decks[deck].trackId,
+        playing: true,
+        positionBars: originBars,
+      };
+    }
+    src.onended = () => {
+      if (nodes.source === src) {
+        nodes.playing = false;
+        nodes.source = null;
+      }
+    };
+  }
+
+  stopReverse(deck: DeckId) {
+    if (!this.decks?.[deck]?.reversing) return;
+    this.stopDeck(deck);
   }
 
   private requestSync() {
@@ -192,6 +287,11 @@ class AudioEngine {
     gain.connect(this.master!);
     send.connect(this.fxInput!);
 
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.45;
+    gain.connect(analyser);
+
     return {
       gain,
       send,
@@ -199,6 +299,7 @@ class AudioEngine {
       eqMid,
       eqHigh,
       filter,
+      filterMode: "allpass",
       buffer: null,
       loadedTrackId: null,
       source: null,
@@ -209,15 +310,46 @@ class AudioEngine {
       rate: 1,
       nativeBpm: 120,
       useStretch: false,
+      analyser,
+      levelBuf: new Uint8Array(new ArrayBuffer(analyser.fftSize)),
+      reversing: false,
     };
   }
 
+  private applyMixerGraph(doc: SetDoc) {
+    if (!this.ctx || !this.decks || !this.master || !this.samplerGain) return;
+    this.master.gain.value = Math.pow(10, doc.mixer.masterDb / 20);
+    this.samplerGain.gain.value = doc.sampler.masterGain;
+    this.applyFx(doc);
+    for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
+      this.applyChannel(deck, doc);
+    }
+  }
+
   private armLoopWatch() {
+    if (this.loopWatchOn) return;
+    this.loopWatchOn = true;
     const tick = () => {
+      if (!this.loopWatchOn) return;
       this.checkLoops();
       this.loopRaf = requestAnimationFrame(tick);
     };
     this.loopRaf = requestAnimationFrame(tick);
+  }
+
+  private disarmLoopWatch() {
+    this.loopWatchOn = false;
+    cancelAnimationFrame(this.loopRaf);
+    this.loopRaf = 0;
+  }
+
+  private syncLoopWatch(doc: SetDoc) {
+    const need = (["A", "B", "C", "D"] as DeckId[]).some((id) => {
+      const d = doc.decks[id];
+      return d.playing && d.loopBars != null && d.loopInBars != null;
+    });
+    if (need) this.armLoopWatch();
+    else this.disarmLoopWatch();
   }
 
   private checkLoops() {
@@ -226,7 +358,13 @@ class AudioEngine {
     for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
       const d = doc.decks[deck];
       const nodes = this.decks[deck];
-      if (!d.playing || d.loopBars == null || d.loopInBars == null || !nodes.playing) {
+      if (
+        !d.playing ||
+        d.loopBars == null ||
+        d.loopInBars == null ||
+        !nodes.playing ||
+        nodes.reversing
+      ) {
         continue;
       }
       const pos = this.getPositionBars(deck);
@@ -255,6 +393,38 @@ class AudioEngine {
     return Boolean(this.decks?.[deck]?.buffer);
   }
 
+  /** Peak-ish 0..1 from the channel tap (after fader / xfader / cue). */
+  getDeckLevel(deck: DeckId): number {
+    const nodes = this.decks?.[deck];
+    if (!nodes) return 0;
+    nodes.analyser.getByteTimeDomainData(nodes.levelBuf);
+    let sum = 0;
+    const buf = nodes.levelBuf;
+    for (let i = 0; i < buf.length; i++) {
+      const v = (buf[i]! - 128) / 128;
+      sum += v * v;
+    }
+    return Math.min(1, Math.sqrt(sum / buf.length) * 2.8);
+  }
+
+  /**
+   * Dezippered param write: skips identical/sub-epsilon frames (automation
+   * ticks at ~60Hz) and ramps the rest with setTargetAtTime instead of
+   * slamming .value (zipper clicks).
+   */
+  private smoothSet(deck: DeckId, key: string, param: AudioParam, value: number) {
+    const cache = (this.appliedCh[deck] ??= {});
+    const prev = cache[key];
+    if (prev === value) return;
+    if (prev != null && Math.abs(prev - value) < 1e-4) {
+      cache[key] = value;
+      return;
+    }
+    cache[key] = value;
+    const t = this.ctx ? this.ctx.currentTime : 0;
+    param.setTargetAtTime(value, t, 0.012);
+  }
+
   private applyChannel(deck: DeckId, doc: SetDoc) {
     if (!this.decks || !this.master) return;
     const nodes = this.decks[deck];
@@ -270,25 +440,63 @@ class AudioEngine {
     }
     if (deck === "C" || deck === "D") xfGain = 0.7;
 
-    nodes.gain.gain.value = ch.fader * xfGain * Math.pow(10, ch.gainDb / 20);
-    // No send bleed when FX is off
-    nodes.send.gain.value = doc.fx.type === "off" ? 0 : (doc.decks[deck].fxSend ?? 0);
-    nodes.eqLow.gain.value = ch.eqLow;
-    nodes.eqMid.gain.value = ch.eqMid;
-    nodes.eqHigh.gain.value = ch.eqHigh;
+    // Cue-to-master: any armed Cue solos those channels (PFL, ignore xfader).
+    const anyCue =
+      doc.mixer.channels.A.cue ||
+      doc.mixer.channels.B.cue ||
+      doc.mixer.channels.C.cue ||
+      doc.mixer.channels.D.cue;
+    if (anyCue) xfGain = ch.cue ? 1 : 0;
 
+    this.smoothSet(deck, "gain", nodes.gain.gain, ch.fader * xfGain * Math.pow(10, ch.gainDb / 20));
+    // Send follows the same mute as the dry path — a silenced deck must not hit the delay.
+    this.smoothSet(
+      deck,
+      "send",
+      nodes.send.gain,
+      doc.fx.type === "off" ? 0 : (doc.decks[deck].fxSend ?? 0) * xfGain * ch.fader,
+    );
+    this.smoothSet(deck, "eqLow", nodes.eqLow.gain, ch.eqLow);
+    this.smoothSet(deck, "eqMid", nodes.eqMid.gain, ch.eqMid);
+    this.smoothSet(deck, "eqHigh", nodes.eqHigh.gain, ch.eqHigh);
+
+    // Only change BiquadFilterNode.type when mode changes (type swaps rebuild the filter).
     if (Math.abs(ch.filter) < 0.05) {
-      nodes.filter.type = "allpass";
-      nodes.filter.frequency.value = 1000;
+      if (nodes.filterMode !== "allpass") {
+        nodes.filter.type = "allpass";
+        nodes.filterMode = "allpass";
+      }
+      this.smoothSet(deck, "filterHz", nodes.filter.frequency, 1000);
     } else if (ch.filter < 0) {
-      nodes.filter.type = "lowpass";
-      nodes.filter.frequency.value = 400 + (1 + ch.filter) * 8000;
-      nodes.filter.Q.value = 0.7;
+      if (nodes.filterMode !== "lowpass") {
+        nodes.filter.type = "lowpass";
+        nodes.filterMode = "lowpass";
+      }
+      this.smoothSet(deck, "filterHz", nodes.filter.frequency, 400 + (1 + ch.filter) * 8000);
+      this.smoothSet(deck, "filterQ", nodes.filter.Q, 0.7);
     } else {
-      nodes.filter.type = "highpass";
-      nodes.filter.frequency.value = 40 + ch.filter * 4000;
-      nodes.filter.Q.value = 0.7;
+      if (nodes.filterMode !== "highpass") {
+        nodes.filter.type = "highpass";
+        nodes.filterMode = "highpass";
+      }
+      this.smoothSet(deck, "filterHz", nodes.filter.frequency, 40 + ch.filter * 4000);
+      this.smoothSet(deck, "filterQ", nodes.filter.Q, 0.7);
     }
+  }
+
+  /** Last FX-bus param values — same dezipper rationale as applyChannel. */
+  private appliedFx: Record<string, number> = {};
+
+  private smoothFx(key: string, param: AudioParam, value: number) {
+    const prev = this.appliedFx[key];
+    if (prev === value) return;
+    if (prev != null && Math.abs(prev - value) < 1e-4) {
+      this.appliedFx[key] = value;
+      return;
+    }
+    this.appliedFx[key] = value;
+    const t = this.ctx ? this.ctx.currentTime : 0;
+    param.setTargetAtTime(value, t, 0.012);
   }
 
   private applyFx(doc: SetDoc) {
@@ -301,24 +509,31 @@ class AudioEngine {
     ) {
       return;
     }
-    const bpm = doc.setTempoBpm ?? doc.decks[doc.tempoMaster].bpm ?? 120;
+    const xf = doc.mixer.crossfader;
+    const bpm =
+      (xf <= 0 ? doc.decks.A.bpm : doc.decks.B.bpm) ??
+      doc.setTempoBpm ??
+      120;
     const beatSec = 60 / Math.max(1, bpm);
-    this.delay.delayTime.value = Math.min(1.9, doc.fx.timeBeats * beatSec);
+    this.smoothFx("delayTime", this.delay.delayTime, Math.min(1.9, doc.fx.timeBeats * beatSec));
 
     const type = doc.fx.type;
     if (type === "off") {
-      this.fxWet.gain.value = 0;
+      this.smoothFx("wet", this.fxWet.gain, 0);
       this.setFxRoute(false, false);
       return;
     }
 
-    this.fxWet.gain.value = doc.fx.wet;
+    this.smoothFx("wet", this.fxWet.gain, doc.fx.wet);
     if (type === "reverb") {
-      this.delayFeedback.gain.value = 0;
+      this.smoothFx("feedback", this.delayFeedback.gain, 0);
       this.setFxRoute(false, true);
     } else {
-      this.delayFeedback.gain.value =
-        type === "echo" ? Math.max(doc.fx.feedback, 0.45) : doc.fx.feedback;
+      this.smoothFx(
+        "feedback",
+        this.delayFeedback.gain,
+        type === "echo" ? Math.max(doc.fx.feedback, 0.45) : doc.fx.feedback,
+      );
       this.setFxRoute(true, false);
     }
   }
@@ -367,6 +582,12 @@ class AudioEngine {
       const nodes = this.decks[deck];
       this.applyChannel(deck, liveDoc);
 
+      if (nodes.reversing) {
+        const d2r = useSetStore.getState().doc.decks[deck];
+        if (!d2r.playing) this.stopDeck(deck);
+        continue;
+      }
+
       const track = d.trackId ? liveDoc.tracks[d.trackId] : null;
       const nativeBpm = track?.analysis?.bpm ?? d.bpm ?? 120;
       nodes.nativeBpm = nativeBpm;
@@ -375,20 +596,11 @@ class AudioEngine {
         this.stopDeck(deck);
         nodes.buffer = null;
         nodes.loadedTrackId = d.trackId;
-        if (d.trackId && track) {
-          const blob = await readAudioBlob(track.fileRef);
+        if (d.trackId && track && this.ctx) {
+          const buf = await getAudioBuffer(this.ctx, track.fileRef);
           const still = useSetStore.getState().doc.decks[deck];
-          if (blob && this.ctx && still.trackId === d.trackId) {
-            try {
-              const buf = await this.ctx.decodeAudioData(
-                (await blob.arrayBuffer()).slice(0),
-              );
-              if (useSetStore.getState().doc.decks[deck].trackId === d.trackId) {
-                nodes.buffer = buf;
-              }
-            } catch {
-              nodes.buffer = null;
-            }
+          if (buf && still.trackId === d.trackId) {
+            nodes.buffer = buf;
           }
         }
       }
@@ -438,6 +650,7 @@ class AudioEngine {
       C: snapDeck(finalDoc, "C"),
       D: snapDeck(finalDoc, "D"),
     };
+    this.syncLoopWatch(finalDoc);
   }
 
   private syncRecord(doc: SetDoc) {
@@ -528,7 +741,7 @@ class AudioEngine {
     };
   }
 
-  private stopDeck(deck: DeckId, rememberOffset = false) {
+  private haltSource(deck: DeckId, rememberOffset = false) {
     if (!this.ctx || !this.decks) return;
     const nodes = this.decks[deck];
     if (rememberOffset && nodes.playing) {
@@ -559,6 +772,11 @@ class AudioEngine {
     nodes.useStretch = false;
   }
 
+  private stopDeck(deck: DeckId, rememberOffset = false) {
+    this.haltSource(deck, rememberOffset);
+    if (this.decks) this.decks[deck].reversing = false;
+  }
+
   async triggerPad(pad: number) {
     await this.ensure();
     if (!this.ctx || !this.samplerGain) return;
@@ -567,9 +785,8 @@ class AudioEngine {
     if (!slot?.trackId) return;
     const track = doc.tracks[slot.trackId];
     if (!track) return;
-    const blob = await readAudioBlob(track.fileRef);
-    if (!blob) return;
-    const buf = await this.ctx.decodeAudioData((await blob.arrayBuffer()).slice(0));
+    const buf = await getAudioBuffer(this.ctx, track.fileRef);
+    if (!buf) return;
     const bpm = track.analysis?.bpm ?? 120;
     const barSec = (60 / bpm) * 4;
     const start = Math.max(0, slot.inBars * barSec);
@@ -591,7 +808,7 @@ class AudioEngine {
       if (e.data.size) this.recordChunks.push(e.data);
     };
     this.recorder = rec;
-    rec.start(250);
+    rec.start(1000);
   }
 
   private stopRecorder() {
@@ -625,6 +842,33 @@ class AudioEngine {
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
+}
+
+function needsTransportSync(prev: SetDoc, next: SetDoc): boolean {
+  if (
+    prev.tracks !== next.tracks ||
+    prev.arrangement !== next.arrangement ||
+    prev.sampler !== next.sampler ||
+    prev.record !== next.record
+  ) {
+    return true;
+  }
+  for (const id of ["A", "B", "C", "D"] as DeckId[]) {
+    const a = prev.decks[id];
+    const b = next.decks[id];
+    if (
+      a.trackId !== b.trackId ||
+      a.playing !== b.playing ||
+      a.positionBars !== b.positionBars ||
+      a.bpm !== b.bpm ||
+      a.keylock !== b.keylock ||
+      a.loopBars !== b.loopBars ||
+      a.loopInBars !== b.loopInBars
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function snapDeck(doc: SetDoc, deck: DeckId) {

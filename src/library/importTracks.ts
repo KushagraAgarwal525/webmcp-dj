@@ -2,6 +2,7 @@ import { useSetStore } from "../commands/pipeline";
 import { persistAnalysis } from "../storage/db";
 import { makeFileRef, writeAudioBlob, readAudioBlob } from "../storage/opfs";
 import { analyzeInWorker, decodeAudioFile } from "../analysis/runAnalysis";
+import { lookupRecordingMeta } from "./musicbrainz";
 
 function parseFilename(name: string): { title: string; artist: string } {
   const base = name.replace(/\.[^.]+$/, "");
@@ -10,6 +11,21 @@ function parseFilename(name: string): { title: string; artist: string } {
     return { artist: parts[0]!.trim(), title: parts.slice(1).join(" - ").trim() };
   }
   return { title: base, artist: "" };
+}
+
+async function enrichGenreFromMusicBrainz(trackId: string, artist: string, title: string) {
+  const track = useSetStore.getState().doc.tracks[trackId];
+  const source = track?.craft?.genreSource;
+  if (source === "human" || source === "agent") return;
+  const meta = await lookupRecordingMeta(artist, title);
+  if (!meta) return;
+  const hint = meta.genres[0] ?? meta.tags[0];
+  if (!hint) return;
+  useSetStore.getState().dispatch({
+    type: "library.setCraft",
+    trackId,
+    craft: { genreHint: hint, genreSource: "musicbrainz" },
+  });
 }
 
 const queue: File[] = [];
@@ -35,6 +51,7 @@ async function processOne(file: File) {
     analysis.durationBars = (decoded.durationSec * analysis.bpm) / 60 / 4;
     await persistAnalysis(trackId, analysis);
     dispatch({ type: "library.setAnalysis", trackId, analysis });
+    void enrichGenreFromMusicBrainz(trackId, artist, title);
   } catch (err) {
     dispatch({
       type: "library.setAnalysisStatus",
@@ -83,4 +100,5 @@ export async function reanalyzeTrack(trackId: string, signal?: AbortSignal) {
   analysis.durationBars = (decoded.durationSec * analysis.bpm) / 60 / 4;
   await persistAnalysis(trackId, analysis);
   dispatch({ type: "library.setAnalysis", trackId, analysis });
+  void enrichGenreFromMusicBrainz(trackId, track.artist, track.title);
 }
