@@ -6,15 +6,20 @@ import { executeLocalTool } from "../webmcp/registry";
 import { PLAYBOOK_TOPICS, TRANSITION_RECIPES } from "../agent/djPlaybook";
 import type { PlaybookTopic, TransitionRecipe } from "../agent/djPlaybook";
 import { deriveEnergyLevel } from "../set/builder";
+import { TRANSITION_TYPES, type TransitionType } from "../types/setdoc";
 
 const ARCS = ["journey", "peak_time", "warm_up", "cool_down", "chill", "power_block"] as const;
 
 export function SetPanel() {
-  const doc = useSetStore((s) => s.doc);
+  const arrangement = useSetStore((s) => s.doc.arrangement);
+  const tracks = useSetStore((s) => s.doc.tracks);
+  const proposal = useSetStore((s) => s.doc.proposal);
+  const automationCount = useSetStore((s) => s.doc.automation.length);
+  const trackCount = useSetStore((s) => Object.keys(s.doc.tracks).length);
   const dispatch = useSetStore((s) => s.dispatch);
   const setActivity = useSetStore((s) => s.setActivity);
   const [verifyText, setVerifyText] = useState<string | null>(null);
-  const [recipe, setRecipe] = useState<TransitionRecipe>("drop_swap");
+  const [recipe, setRecipe] = useState<TransitionRecipe>("power_cut");
   const [arc, setArc] = useState<(typeof ARCS)[number]>("journey");
   const [bookTopic, setBookTopic] = useState<PlaybookTopic>("all");
   const [intent, setIntent] = useState("");
@@ -130,7 +135,7 @@ export function SetPanel() {
         <button
           type="button"
           className="panel-action"
-          disabled={doc.arrangement.length < 2}
+          disabled={arrangement.length < 2}
           onClick={() => void showJson("verify_set", { source: "arrangement" }, "verify")}
         >
           Verify
@@ -138,7 +143,7 @@ export function SetPanel() {
         <button
           type="button"
           className="panel-action"
-          disabled={!doc.arrangement.length && !doc.proposal}
+          disabled={!arrangement.length && !proposal}
           onClick={() => dispatch({ type: "set.clear" })}
         >
           Clear
@@ -157,7 +162,7 @@ export function SetPanel() {
         </label>
         <button
           type="button"
-          disabled={preparing || Object.keys(doc.tracks).length < 2}
+          disabled={preparing || trackCount < 2}
           onClick={() => void runPrepare()}
         >
           {preparing ? "Preparing…" : "Prepare"}
@@ -180,7 +185,7 @@ export function SetPanel() {
         </label>
         <button
           type="button"
-          disabled={Object.keys(doc.tracks).length < 2}
+          disabled={trackCount < 2}
           onClick={() =>
             void showJson("plan_set_arc", { arc, apply: true }, `plan ${arc}`)
           }
@@ -189,14 +194,14 @@ export function SetPanel() {
         </button>
         <button
           type="button"
-          disabled={doc.arrangement.length < 2}
+          disabled={arrangement.length < 2}
           onClick={() => void showJson("apply_power_block", {}, "power block")}
         >
           Block
         </button>
       </div>
 
-      {doc.arrangement.length >= 2 && (
+      {arrangement.length >= 2 && (
         <div className="set-recipe-row">
           <label>
             Recipe
@@ -213,7 +218,7 @@ export function SetPanel() {
           </label>
           <button
             type="button"
-            disabled={doc.arrangement.length < 2}
+            disabled={arrangement.length < 2}
             onClick={() => void applyRecipe(1)}
             title="Apply recipe to incoming entry (index 1)"
           >
@@ -226,12 +231,12 @@ export function SetPanel() {
         <pre className="set-verify mono">{verifyText.slice(0, 1200)}</pre>
       )}
 
-      {doc.proposal && (
+      {proposal && (
         <div className="proposal-card">
           <div className="proposal-title">Proposed set</div>
           <p className="proposal-reason">
-            {doc.proposal.reason ??
-              `${doc.proposal.entries.length} tracks staged for approval.`}
+            {proposal.reason ??
+              `${proposal.entries.length} tracks staged for approval.`}
           </p>
           <div className="proposal-actions">
             <button
@@ -249,31 +254,113 @@ export function SetPanel() {
       )}
 
       <ol className="set-list">
-        {doc.arrangement.length === 0 && !doc.proposal && (
+        {arrangement.length === 0 && !proposal && (
           <li className="set-empty">
             Prepare writes a playable first set from the crate. Play it, or rewrite a join.
           </li>
         )}
-        {doc.automation.length > 0 && (
+        {automationCount > 0 && (
           <li className="set-empty">
-            {doc.automation.length} automation lane
-            {doc.automation.length === 1 ? "" : "s"} on set timeline
+            {automationCount} automation lane
+            {automationCount === 1 ? "" : "s"} on set timeline
           </li>
         )}
-        {doc.arrangement.map((entry, index) => {
-          const track = doc.tracks[entry.trackId];
+        {arrangement.map((entry, index) => {
+          const track = tracks[entry.trackId];
           const energy = track ? deriveEnergyLevel(track) : null;
-          const role = track?.craft?.role ?? track?.analysis?.suggestedRole;
+          const role = track?.craft?.role;
+          const maxOut = track?.analysis?.durationBars ?? entry.outBars;
           return (
             <li key={entry.id} className="set-item">
               <span className="set-index mono">{index + 1}</span>
               <div>
                 <div className="set-title">{track?.title ?? entry.trackId}</div>
                 <div className="set-sub mono">
-                  {entry.inBars.toFixed(0)}–{entry.outBars.toFixed(0)} bars ·{" "}
-                  {entry.transition.type} {entry.transition.bars}b
-                  {energy != null ? ` · E${energy}` : ""}
+                  {energy != null ? `E${energy}` : ""}
                   {role ? ` · ${role}` : ""}
+                </div>
+                <div className="set-edit">
+                  <label>
+                    in
+                    <input
+                      type="number"
+                      className="mono"
+                      min={0}
+                      max={maxOut}
+                      step={1}
+                      value={Math.round(entry.inBars)}
+                      onChange={(e) =>
+                        dispatch({
+                          type: "set.setTrim",
+                          index,
+                          inBars: Number(e.target.value),
+                          outBars: entry.outBars,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    out
+                    <input
+                      type="number"
+                      className="mono"
+                      min={entry.inBars + 1}
+                      max={maxOut}
+                      step={1}
+                      value={Math.round(entry.outBars)}
+                      onChange={(e) =>
+                        dispatch({
+                          type: "set.setTrim",
+                          index,
+                          inBars: entry.inBars,
+                          outBars: Number(e.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  {index >= 1 && (
+                    <>
+                      <label>
+                        join
+                        <select
+                          value={entry.transition.type}
+                          onChange={(e) =>
+                            dispatch({
+                              type: "set.setTransition",
+                              index,
+                              transition: e.target.value as TransitionType,
+                              bars: entry.transition.bars,
+                            })
+                          }
+                        >
+                          {TRANSITION_TYPES.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        bars
+                        <input
+                          type="number"
+                          className="mono"
+                          min={0}
+                          max={32}
+                          step={1}
+                          value={entry.transition.bars}
+                          onChange={(e) =>
+                            dispatch({
+                              type: "set.setTransition",
+                              index,
+                              transition: entry.transition.type,
+                              bars: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
                 </div>
               </div>
               {index >= 1 && (

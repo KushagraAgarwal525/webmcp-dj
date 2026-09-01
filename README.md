@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Enable WebMCP in Chrome Canary: `chrome://flags/#enable-webmcp-testing` (or launch with `--enable-features=WebMCPTesting,DevToolsWebMCPSupport`).
+Enable WebMCP in Chrome Canary: `chrome://flags/#enable-webmcp-testing` (or launch with `--enable-features=WebMCPTesting,DevToolsWebMCPSupport`). Agent tools are curated by default (compose/verify surface); add `?booth=1` to also expose deck/mixer/sampler hardware tools.
 
 First draft: Set → **Prepare** (or `prepare_set`). Optional one-line intent; empty infers the night from crate cards. Play is the demo. Rewrite any join after.
 

@@ -4,6 +4,8 @@ import { useSetStore } from "../commands/pipeline";
 import { setPerformer } from "../audio/setPerformer";
 import { exportBlset, importBlset } from "../storage/blset";
 import { audioEngine } from "../audio/engine";
+import { BananaLogo } from "./BananaLogo";
+import { downloadSetWav } from "../audio/renderSet";
 
 export function TopBar() {
   const title = useSetStore((s) => s.doc.title);
@@ -28,7 +30,37 @@ export function TopBar() {
         : "Play";
 
   const fileRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState<"share" | "upload" | null>(null);
+  const [busy, setBusy] = useState<"share" | "upload" | "download" | null>(null);
+
+  async function onDownloadWav() {
+    if (busy) return;
+    if (!hasArrangement) {
+      useSetStore.getState().setActivity("Add tracks to the set before Download");
+      return;
+    }
+    setBusy("download");
+    try {
+      if (setPlaying) setPerformer.pause();
+      const doc = useSetStore.getState().doc;
+      useSetStore.getState().setActivity("Bouncing set to WAV…");
+      const result = await downloadSetWav(doc, doc.title, (p, label) => {
+        useSetStore
+          .getState()
+          .setActivity(`${label} ${Math.round(p * 100)}%`);
+      });
+      const mb = (result.bytes / (1024 * 1024)).toFixed(1);
+      useSetStore
+        .getState()
+        .setActivity(`Downloaded WAV · ${result.durationSec.toFixed(0)}s · ${mb} MB`);
+    } catch (e) {
+      console.error(e);
+      useSetStore
+        .getState()
+        .setActivity(e instanceof Error ? e.message : "Download failed");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function onShare() {
     if (busy) return;
@@ -74,8 +106,8 @@ export function TopBar() {
 
   return (
     <header className="topbar">
-      <div className="topbar-brand">
-        <span className="topbar-logo" aria-hidden />
+      <div className="topbar-brand" title="BananaLabs">
+        <BananaLogo size={22} />
         <span className="topbar-product">BananaLabs</span>
       </div>
 
@@ -103,6 +135,15 @@ export function TopBar() {
           onClick={() => void setPerformer.toggle()}
         >
           {playLabel}
+        </button>
+        <button
+          type="button"
+          className="topbar-btn"
+          disabled={busy !== null || !hasArrangement}
+          title="Bounce arrangement (transitions + automation) to a WAV file"
+          onClick={() => void onDownloadWav()}
+        >
+          {busy === "download" ? "…" : "Download"}
         </button>
         <button
           type="button"

@@ -1,4 +1,5 @@
 import "./ProposalBanner.css";
+import { formatCamelot } from "../set/builder";
 import { useSetStore } from "../commands/pipeline";
 
 export function ProposalBanner() {
@@ -15,7 +16,7 @@ export function ProposalBanner() {
       i: i + 1,
       title: t?.title ?? e.trackId,
       bpm: t?.analysis?.bpm,
-      key: t?.analysis?.key.camelot,
+      key: formatCamelot(t?.analysis?.key),
       bars: Math.round(e.outBars - e.inBars),
       inBars: e.inBars,
       outBars: e.outBars,

@@ -1,8 +1,8 @@
-import type { TransitionRecipe } from "../agent/djPlaybook";
 import { analysisNeedsRefresh } from "../analysis/stale";
 import type {
   ArrangementEntry,
   AutomationLane,
+  ComposeStyle,
   SetDoc,
   Track,
   TrackMood,
@@ -13,26 +13,45 @@ import {
   applyRecipeBars,
   classifyCamelotMove,
   deriveEnergyLevel,
+  keyIsTrusted,
+  safeLeaveBars,
   snapToPhrase,
   verifySet,
   type VerifyResult,
 } from "./builder";
 import {
+  alignBlendJoin,
   alignDropJoin,
+  alignEchoJoin,
+  alignTeaseJoin,
+  bpmLane,
+  chooseJoinFromRecords,
+  chopWindow,
+  clipSlot,
   crateHealth,
   findDropBars,
   findHoleBars,
+  findPeakDropBars,
+  inferStyle,
+  isChopJoin,
   isDropRecipe,
+  joinCompileReport,
+  joinFallbacks,
   planSetArc,
   tempoRelation,
   trackGenre,
   trackMood,
   trackRole,
   trackVocalLead,
+  type JoinCompileReport,
+  type JoinPick,
   type SetArcId,
 } from "./craft";
 import { previewJoin, type JoinListen } from "./previewJoin";
 import { buildTimeline } from "./timeline";
+
+// Kept for older callers (smoke scripts import the composer from here).
+export { chooseJoinFromRecords } from "./craft";
 
 export type CrateCard = {
   track_id: string;
@@ -41,23 +60,33 @@ export type CrateCard = {
   bpm: number | null;
   camelot: string | null;
   key_name: string | null;
+  key_confidence: number | null;
+  key_trusted: boolean;
   energy_level: number | null;
+  /** High-band ratio 0..1 — display this, never the word "dark". */
+  brightness: number | null;
+  bpm_lane: string | null;
+  /** Curated (tag_track) — null until the agent/human sets it. */
   role: TrackRole | null;
   mood: TrackMood | null;
   genre: string | null;
   vocal_lead: boolean;
   drop_bars: number | null;
   hole_bars: number | null;
+  safe_leave_bars: number | null;
   cue_before_drop_8: number | null;
   cue_before_drop_16: number | null;
   duration_bars: number | null;
+  heat_in_bars: number | null;
+  heat_out_bars: number | null;
   stale: boolean;
 };
 
-export type JoinPick = {
-  recipe: TransitionRecipe;
-  bars: number;
-  reason: string;
+
+export type JoinOverride = {
+  index: number;
+  recipe?: string;
+  bars?: number;
 };
 
 export type PreparedJoin = JoinPick & {
@@ -67,11 +96,18 @@ export type PreparedJoin = JoinPick & {
   retries: number;
   verdict: JoinListen["verdict"] | "skipped";
   notes: string[];
+  /** Full candidate trail — why each pick passed or failed (transparency for re-edits). */
+  tries: Array<{ recipe: string; bars: number; pass: boolean; why: string }>;
+  /** Other recipe/bars pairs that also pass verify + preview for this pair. */
+  alternatives: Array<{ recipe: string; bars: number }>;
+  /** What the compiler did: commit bar on the set clock and drop anchor. */
+  commit: JoinCompileReport | null;
+  override: boolean;
 };
 
 export type PrepareSetResult = {
   intent: string | null;
-  inferred: { arc: SetArcId; reason: string; track_count: number };
+  inferred: { arc: SetArcId; reason: string; track_count: number; style: ComposeStyle };
   cards: CrateCard[];
   entries: Array<{
     track_id: string;
@@ -90,13 +126,14 @@ export type PrepareSetResult = {
 
 export function crateCard(track: Track): CrateCard {
   const a = track.analysis;
-  const drop = findDropBars(track);
+  const drop = findPeakDropBars(track) ?? findDropBars(track);
   const hole = findHoleBars(track);
   const dur = a?.durationBars ?? null;
   const cue = (n: number) =>
     drop == null || dur == null
       ? null
       : Math.max(0, Math.min(snapToPhrase(drop - n), Math.max(0, dur - n)));
+  const trusted = keyIsTrusted(track);
   return {
     track_id: track.id,
     title: track.title,
@@ -104,16 +141,23 @@ export function crateCard(track: Track): CrateCard {
     bpm: a?.bpm ?? null,
     camelot: a?.key.camelot ?? null,
     key_name: a?.key.name ?? null,
+    key_confidence: a?.key.confidence ?? null,
+    key_trusted: trusted,
     energy_level: deriveEnergyLevel(track),
+    brightness: a?.brightness ?? null,
+    bpm_lane: a ? bpmLane(a.bpm) : null,
     role: trackRole(track),
     mood: trackMood(track),
     genre: trackGenre(track),
     vocal_lead: trackVocalLead(track),
     drop_bars: drop,
     hole_bars: hole,
+    safe_leave_bars: drop != null ? safeLeaveBars(track, drop) : null,
     cue_before_drop_8: cue(8),
     cue_before_drop_16: cue(16),
     duration_bars: dur != null ? Number(dur.toFixed(2)) : null,
+    heat_in_bars: a?.heatInBars ?? null,
+    heat_out_bars: a?.heatOutBars ?? null,
     stale: analysisNeedsRefresh(a),
   };
 }
@@ -134,7 +178,7 @@ export function inferNight(
   doc: SetDoc,
   intent?: string,
   trackCount?: number,
-): { arc: SetArcId; reason: string; track_count: number } {
+): { arc: SetArcId; reason: string; track_count: number; style: ComposeStyle } {
   const pool = Object.values(doc.tracks).filter((t) => t.analysis);
   const health = crateHealth(doc);
   const levels = pool
@@ -170,6 +214,7 @@ export function inferNight(
       arc: named,
       reason: `Intent “${intent!.trim()}” → ${named}.`,
       track_count: n,
+      style: inferStyle(intent, named),
     };
   }
 
@@ -181,174 +226,14 @@ export function inferNight(
   } else if (spread <= 1 && mean <= 4.5) {
     arc = "chill";
     reason = `Crate sits low (mean E${mean.toFixed(1)}) — chill order.`;
-  } else if ((health.roles.opener ?? 0) === 0 && peak >= 8 && spread >= 3) {
-    arc = "warm_up";
-    reason = "No tagged opener and a real peak — warm-up climb.";
   } else if (lanes.length === 1 && (lanes[0] === "dnb" || lanes[0] === "hard")) {
     arc = "peak_time";
     reason = `Single ${lanes[0]} lane — peak-time block.`;
   }
 
-  return { arc, reason, track_count: n };
+  return { arc, reason, track_count: n, style: inferStyle(intent, arc) };
 }
 
-/** Facts about these two files — not a genre script. */
-export function chooseJoinFromRecords(outgoing: Track, incoming: Track): JoinPick {
-  const outA = outgoing.analysis;
-  const inA = incoming.analysis;
-  if (!outA || !inA) {
-    return { recipe: "power_cut", bars: 1, reason: "Missing analysis — cut." };
-  }
-
-  const outDrop = findDropBars(outgoing);
-  const inDrop = findDropBars(incoming);
-  const hole = findHoleBars(outgoing);
-  const rel = tempoRelation(outA.bpm, inA.bpm);
-  const move = classifyCamelotMove(outA.key.camelot, inA.key.camelot);
-  const twoVocals = trackVocalLead(outgoing) && trackVocalLead(incoming);
-  const eOut = deriveEnergyLevel(outgoing) ?? 5;
-  const eIn = deriveEnergyLevel(incoming) ?? 5;
-  const lift = eIn - eOut;
-  const inHasDrop = inDrop != null && inDrop >= 8;
-  const outHasDrop = outDrop != null;
-  const canCue16 = inDrop != null && inDrop >= 16;
-  const canCue8 = inDrop != null && inDrop >= 8;
-  const safeKey =
-    move === "same" || move === "adjacent" || move === "relative" || move === "energy_boost";
-  const inBuild = inA.sections.some(
-    (s) => s.label === "build" && (inDrop == null || s.endBars <= inDrop + 1),
-  );
-
-  if (rel === "half" || rel === "double") {
-    return {
-      recipe: "half_bridge",
-      bars: 8,
-      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} is ${rel} — echo-shaped exit + tempo snap.`,
-    };
-  }
-  if (rel === "far") {
-    if (hole != null) {
-      return {
-        recipe: "echo_out",
-        bars: 8,
-        reason: `BPM too far to share a phrase; outgoing has a hole at ${hole}.`,
-      };
-    }
-    return {
-      recipe: "power_cut",
-      bars: 1,
-      reason: `BPM too far to blend (${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)}).`,
-    };
-  }
-
-  if (move === "clash" || move === "jaws") {
-    if (inHasDrop) {
-      return {
-        recipe: "power_cut",
-        bars: 1,
-        reason: `${outA.key.camelot}→${inA.key.camelot} ${move} — cut on the incoming 1.`,
-      };
-    }
-    return {
-      recipe: hole != null ? "echo_out" : "power_cut",
-      bars: hole != null ? 8 : 1,
-      reason: `${move} ${outA.key.camelot}→${inA.key.camelot} — do not pad-blend.`,
-    };
-  }
-
-  if (twoVocals && inHasDrop && outHasDrop) {
-    return {
-      recipe: "drop_swap",
-      bars: canCue8 ? 8 : 1,
-      reason: "Both files carry vocals and drops — isolator replace, short overlap.",
-    };
-  }
-  if (twoVocals) {
-    return {
-      recipe: "eq_swap",
-      bars: 8,
-      reason: "Two vocal leads — mid handoff, not a long pad.",
-    };
-  }
-
-  if (trackVocalLead(incoming) && !trackVocalLead(outgoing) && hole != null) {
-    return {
-      recipe: "hook_layer",
-      bars: 12,
-      reason: `Incoming vocal over outgoing hole at ${hole}.`,
-    };
-  }
-
-  if (inHasDrop && outHasDrop && Math.abs(lift) <= 1 && canCue16 && safeKey) {
-    return {
-      recipe: "double_drop",
-      bars: 16,
-      reason: `Both drops (${outDrop} / ${inDrop}), energy ${eOut}→${eIn} — stack the 1.`,
-    };
-  }
-
-  if (inHasDrop && (outHasDrop || hole != null) && lift >= 0) {
-    const n = canCue16 ? 16 : 8;
-    return {
-      recipe: "drop_swap",
-      bars: n,
-      reason: hole != null && !outHasDrop
-        ? `Incoming drop ${inDrop}; leave through outgoing hole ${hole}.`
-        : `Replace: incoming drop ${inDrop}, outgoing drop ${outDrop}.`,
-    };
-  }
-
-  if (inHasDrop && inBuild && canCue8) {
-    return {
-      recipe: "filter_sweep",
-      bars: canCue16 ? 16 : 8,
-      reason: "Incoming has a build into its drop — tension then the 1.",
-    };
-  }
-
-  if (inHasDrop && !outHasDrop) {
-    return {
-      recipe: "power_cut",
-      bars: 1,
-      reason: `Incoming drop at ${inDrop}; outgoing has no pictured drop to swap.`,
-    };
-  }
-
-  if (!inHasDrop && !twoVocals && safeKey) {
-    return {
-      recipe: "bass_swap",
-      bars: 8,
-      reason: `${outA.key.camelot}→${inA.key.camelot} ${move}, no incoming drop — one-bass blend.`,
-    };
-  }
-
-  return {
-    recipe: inHasDrop ? "drop_swap" : "bass_swap",
-    bars: inHasDrop && canCue8 ? 8 : 8,
-    reason: "Default from these two files: drop replace if a drop exists, else one-bass blend.",
-  };
-}
-
-function fallbacks(first: JoinPick, outgoing: Track, incoming: Track): JoinPick[] {
-  const list: JoinPick[] = [first];
-  const add = (recipe: TransitionRecipe, bars: number, reason: string) => {
-    if (!list.some((x) => x.recipe === recipe && x.bars === bars)) {
-      list.push({ recipe, bars, reason });
-    }
-  };
-  add("power_cut", 1, "retry: cut on the 1");
-  if (findHoleBars(outgoing) != null) {
-    add("echo_out", 8, "retry: leave through the hole");
-  }
-  if (trackVocalLead(outgoing) && trackVocalLead(incoming)) {
-    add("eq_swap", 8, "retry: mid handoff");
-  }
-  if (findDropBars(incoming) != null) {
-    add("drop_swap", 8, "retry: shorter replace");
-  }
-  add("bass_swap", 8, "retry: one-bass blend");
-  return list.slice(0, 4);
-}
 
 function applyPick(
   outgoing: Track,
@@ -361,11 +246,47 @@ function applyPick(
   if (!applied) return;
   const durIn = Math.max(8, incoming.analysis?.durationBars ?? 32);
   const durOut = Math.max(8, outgoing.analysis?.durationBars ?? 32);
-  if (isDropRecipe(pick.recipe) || pick.recipe === "backspin") {
-    const mode = pick.recipe === "power_cut" || pick.recipe === "backspin" ? "cut" : "swap";
+  if (pick.park === "hole") {
+    // Hole-parked blend: the overlap sits on the outgoing's tonal hole under
+    // the incoming's build — two harmonies never co-occur.
+    const aligned = alignBlendJoin(outgoing, incoming, applied.bars);
+    if (aligned) {
+      outEntry.outBars = Math.max(outEntry.inBars + 8, Math.min(durOut, aligned.outBars));
+      inEntry.inBars = Math.max(0, Math.min(aligned.inBars, Math.max(0, durIn - 8)));
+      inEntry.outBars = Math.min(durIn, Math.max(inEntry.inBars + 16, inEntry.outBars));
+      if (outEntry.outBars <= outEntry.inBars) outEntry.outBars = Math.min(durOut, outEntry.inBars + 16);
+      inEntry.transition = { type: applied.type, bars: applied.bars };
+      return;
+    }
+    // No hole after all — fall through to the drop parking below.
+  }
+  if (pick.recipe === "tease_slam") {
+    // Tease parking: incoming at drop−bars so the drop lands on the commit.
+    const aligned = alignTeaseJoin(outgoing, incoming, applied.bars);
+    outEntry.outBars = Math.max(outEntry.inBars + 8, Math.min(durOut, aligned.outBars));
+    // The outgoing clip must host the full tease plus a solo lead-in — if a
+    // vocal wall collapsed the safe leave, the overlap clamps and the drop
+    // lands late. Grow on the phrase grid; the slam chops on the 1 by design.
+    const need = outEntry.inBars + applied.bars + 8;
+    if (outEntry.outBars < need) {
+      outEntry.outBars = Math.min(durOut, Math.ceil(need / 8) * 8);
+    }
+    inEntry.inBars = Math.max(0, Math.min(aligned.inBars, Math.max(0, durIn - 8)));
+  } else if (isDropRecipe(pick.recipe) || pick.recipe === "backspin") {
+    const mode =
+      pick.recipe === "power_cut" ||
+      pick.recipe === "backspin" ||
+      pick.recipe === "air_cut" ||
+      pick.recipe === "loop_roll"
+        ? "cut"
+        : "swap";
     const aligned = alignDropJoin(outgoing, incoming, applied.bars, mode);
     outEntry.outBars = Math.max(outEntry.inBars + 8, Math.min(durOut, aligned.outBars));
     inEntry.inBars = Math.max(0, Math.min(aligned.inBars, Math.max(0, durIn - 8)));
+  } else if (pick.recipe === "echo_out" || pick.recipe === "half_bridge") {
+    const aligned = alignEchoJoin(outgoing, incoming, applied.bars);
+    outEntry.outBars = Math.max(outEntry.inBars + 16, Math.min(durOut, aligned.outBars));
+    inEntry.inBars = Math.max(0, Math.min(aligned.inBars, Math.max(0, durIn - 16)));
   }
   inEntry.outBars = Math.min(durIn, Math.max(inEntry.inBars + 16, inEntry.outBars));
   if (inEntry.outBars <= inEntry.inBars) inEntry.outBars = Math.min(durIn, inEntry.inBars + 16);
@@ -410,9 +331,16 @@ function tempoLanes(doc: SetDoc, entries: ArrangementEntry[]): AutomationLane[] 
     const bpmA = doc.tracks[prev.trackId]?.analysis?.bpm;
     const bpmB = doc.tracks[cur.trackId]?.analysis?.bpm;
     if (!bpmA || !bpmB || Math.abs(bpmB - bpmA) <= 3) continue;
+    if (
+      cur.transition.type === "echo_out" ||
+      cur.transition.type === "cut" ||
+      cur.transition.type === "backspin"
+    ) {
+      continue;
+    }
     const span = spans[i];
     const prevSpan = spans[i - 1];
-    if (!span || !prevSpan) continue;
+    if (!span || !prevSpan || span.overlapBars <= 0) continue;
     const start = span.setStart;
     const end = Math.min(span.setStart + cur.transition.bars, prevSpan.setEnd);
     const rel = tempoRelation(bpmA, bpmB);
@@ -432,7 +360,13 @@ function tempoLanes(doc: SetDoc, entries: ArrangementEntry[]): AutomationLane[] 
 
 export async function prepareSet(
   doc: SetDoc,
-  opts: { intent?: string; trackCount?: number; hear?: boolean } = {},
+  opts: {
+    intent?: string;
+    trackCount?: number;
+    order?: string[];
+    joinOverrides?: JoinOverride[];
+    hear?: boolean;
+  } = {},
 ): Promise<{
   result: Omit<PrepareSetResult, "applied" | "proposed">;
   arrangement: ArrangementEntry[];
@@ -440,8 +374,8 @@ export async function prepareSet(
 }> {
   const cards = crateCards(doc);
   const inferred = inferNight(doc, opts.intent, opts.trackCount);
-  const plan = planSetArc(doc, inferred.arc, inferred.track_count);
-  if (plan.entries.length < 2) {
+  const plan = planSetArc(doc, inferred.arc, inferred.track_count, inferred.style);
+  if (plan.entries.length < 2 && (opts.order?.length ?? 0) < 2) {
     return {
       result: {
         intent: opts.intent?.trim() || null,
@@ -459,20 +393,70 @@ export async function prepareSet(
     };
   }
 
-  const planned = plan.entries
-    .map((e) => doc.tracks[e.track_id])
-    .filter((t): t is Track => Boolean(t?.analysis));
-  const leftover = Object.values(doc.tracks).filter(
-    (t) => t.analysis && !planned.some((p) => p.id === t.id),
-  );
-  const sequence = injectContrast(planned, leftover);
+  const pool = Object.values(doc.tracks).filter((t) => t.analysis);
+  let sequence: Track[];
+  let orderNote = "";
+  if (opts.order?.length) {
+    const byId = new Map(pool.map((t) => [t.id, t] as const));
+    const ordered = opts.order
+      .map((id) => byId.get(id))
+      .filter((t): t is Track => Boolean(t));
+    sequence = [...new Map(ordered.map((t) => [t.id, t] as const)).values()];
+    const missing = opts.order.filter((id) => !byId.has(id));
+    if (missing.length) {
+      orderNote = ` Unknown/unanalyzed order ids skipped: ${missing.join(", ")}.`;
+    }
+  } else {
+    const planned = plan.entries
+      .map((e) => doc.tracks[e.track_id])
+      .filter((t): t is Track => Boolean(t?.analysis));
+    if (plan.via === "path-dp") {
+      // The path optimizer already paid for contrast in its edge costs —
+      // swapping tracks after the fact would fight the optimum.
+      sequence = planned;
+    } else {
+      const leftover = pool.filter((t) => !planned.some((p) => p.id === t.id));
+      sequence = injectContrast(planned, leftover);
+    }
+  }
 
-  const arrangement: ArrangementEntry[] = sequence.map((t) => {
+  if (sequence.length < 2) {
+    return {
+      result: {
+        intent: opts.intent?.trim() || null,
+        inferred,
+        cards,
+        entries: [],
+        joins: [],
+        verify: {
+          ready: false,
+          issues: [
+            {
+              code: "too_short",
+              message: "Order needs at least 2 analyzed tracks.",
+              severity: "error",
+            },
+          ],
+        },
+      },
+      arrangement: [],
+      automation: [],
+    };
+  }
+
+  const arrangement: ArrangementEntry[] = sequence.map((t, i) => {
     const plannedRow = plan.entries.find((e) => e.track_id === t.id);
     const dur = Math.max(8, t.analysis?.durationBars ?? 32);
     const drop = findDropBars(t);
-    const inBars = plannedRow?.in_bars ?? (drop != null ? Math.min(drop, Math.max(0, dur - 8)) : 0);
-    const outBars = plannedRow?.out_bars ?? dur;
+    const chop =
+      inferred.style === "chop"
+        ? chopWindow(t, clipSlot(i, sequence.length, inferred.style))
+        : null;
+    const inBars =
+      chop?.inBars ??
+      plannedRow?.in_bars ??
+      (drop != null ? Math.min(drop, Math.max(0, dur - 8)) : 0);
+    const outBars = chop?.outBars ?? plannedRow?.out_bars ?? dur;
     return {
       id: crypto.randomUUID(),
       trackId: t.id,
@@ -485,51 +469,164 @@ export async function prepareSet(
     };
   });
 
+  function clampChopClip(track: Track, entry: ArrangementEntry, keep: "in" | "out") {
+    if (inferred.style !== "chop") return;
+    const dur = Math.max(8, track.analysis?.durationBars ?? 32);
+    entry.outBars = Math.min(dur, Math.max(entry.inBars + 8, entry.outBars));
+    if (entry.outBars - entry.inBars > 32) {
+      // Drop-anchored joins park the ENTRANCE (tease_slam at drop−bars, slams
+      // at the drop). Sliding inBars forward to keep the tail would break the
+      // anchor — the drop would land off the commit. Trim the tail instead.
+      const anchorLocked =
+        entry.transition.type === "tease_slam" ||
+        entry.transition.type === "cut" ||
+        entry.transition.type === "air_cut" ||
+        entry.transition.type === "backspin" ||
+        entry.transition.type === "loop_roll";
+      if (keep === "in" || anchorLocked) {
+        entry.outBars = Math.min(dur, entry.inBars + 32);
+      } else {
+        entry.inBars = Math.max(0, entry.outBars - 32);
+      }
+    }
+    if (entry.outBars - entry.inBars < 8) {
+      entry.outBars = Math.min(dur, entry.inBars + 16);
+    }
+  }
+
   const hear = opts.hear !== false;
   const joins: PreparedJoin[] = [];
+  const overrides = (opts.joinOverrides ?? []).filter(
+    (o) => Number.isFinite(o.index) && o.index >= 1 && o.index < arrangement.length,
+  );
+
+  const gateCandidate = async (
+    outgoing: Track,
+    incoming: Track,
+    i: number,
+    pick: JoinPick,
+    hearAudio: boolean,
+  ): Promise<{ pass: boolean; errors: string[]; listen: JoinListen | null }> => {
+    applyPick(outgoing, incoming, arrangement[i - 1]!, arrangement[i]!, pick);
+    clampChopClip(outgoing, arrangement[i - 1]!, "out");
+    clampChopClip(incoming, arrangement[i]!, "in");
+    const lanes = tempoLanes(doc, arrangement);
+    const working: SetDoc = { ...doc, arrangement, automation: lanes };
+    const gate = verifySet(working, arrangement);
+    const joinErrors = gate.issues
+      .filter((iss) => iss.severity === "error" && iss.index === i)
+      .map((iss) => iss.message);
+    let listen: JoinListen | null = null;
+    try {
+      listen = await previewJoin(working, i, hearAudio);
+    } catch {
+      /* preview failure is not a gate failure by itself */
+    }
+    return {
+      pass: joinErrors.length === 0 && listen?.verdict !== "fail",
+      errors: joinErrors,
+      listen,
+    };
+  };
 
   for (let i = 1; i < arrangement.length; i++) {
     const outgoing = doc.tracks[arrangement[i - 1]!.trackId]!;
     const incoming = doc.tracks[arrangement[i]!.trackId]!;
-    const first = chooseJoinFromRecords(outgoing, incoming);
-    const candidates = fallbacks(first, outgoing, incoming);
-    let chosen = first;
+    const first = chooseJoinFromRecords(outgoing, incoming, inferred.style);
+
+    const ov = overrides.find((o) => o.index === i);
+    let forced: JoinPick | null = null;
+    let overrideNote = "";
+    if (ov) {
+      const recipeName = (ov.recipe ?? first.recipe) as JoinPick["recipe"];
+      const applied = applyRecipeBars(recipeName, ov.bars);
+      if (applied) {
+        forced = {
+          recipe: recipeName,
+          bars: applied.bars,
+          reason: "operator override",
+        };
+      } else {
+        overrideNote = `Override recipe "${String(ov.recipe)}" is unknown — auto pick kept. Valid recipes: tease_slam, drop_swap, double_drop, power_cut, build_cut, bass_swap, eq_swap, filter_sweep, echo_out, loop_out, loop_roll, backspin, hook_layer, half_bridge, tempo_ride, power_block.`;
+      }
+    }
+
+    const base = forced ?? first;
+    let candidates = joinFallbacks(base, outgoing, incoming, inferred.style);
+    if (inferred.style === "chop" && joins.length) {
+      const prev = joins[joins.length - 1]!.recipe;
+      if (candidates[0]?.recipe === prev) {
+        const alt = candidates.findIndex((c) => c.recipe !== prev && isChopJoin(c.recipe));
+        if (alt > 0) {
+          const pick = candidates.splice(alt, 1)[0]!;
+          candidates.unshift(pick);
+        }
+      }
+    }
+
+    // A closer should LAND on its drop, not enter from silence — put landing
+    // moves ahead of leaves on the final join.
+    const isCloserJoin = i === arrangement.length - 1;
+    if (
+      isCloserJoin &&
+      (candidates[0]?.recipe === "echo_out" || candidates[0]?.recipe === "half_bridge") &&
+      findDropBars(incoming) != null
+    ) {
+      const closerDrop = findDropBars(incoming)!;
+      const landing: JoinPick[] = [
+        {
+          recipe: "tease_slam",
+          bars: closerDrop >= 20 ? 16 : 8,
+          reason: "closer is teased in, then lands on its drop",
+        },
+        { recipe: "backspin", bars: 1, reason: "closer lands via rewind slam" },
+      ];
+      const rest = candidates.filter(
+        (c) => c.recipe !== "tease_slam" && c.recipe !== "backspin",
+      );
+      candidates = [...landing, ...rest].slice(0, 4);
+    }
+    let chosen = base;
     let verdict: JoinListen["verdict"] | "skipped" = "skipped";
     let notes: string[] = [];
     let retries = 0;
+    const tries: Array<{ recipe: string; bars: number; pass: boolean; why: string }> = [];
 
     for (let c = 0; c < candidates.length; c++) {
       const pick = candidates[c]!;
-      applyPick(outgoing, incoming, arrangement[i - 1]!, arrangement[i]!, pick);
-      const lanes = tempoLanes(doc, arrangement);
-      const working: SetDoc = { ...doc, arrangement, automation: lanes };
-      const gate = verifySet(working, arrangement);
-      const joinErrors = gate.issues.filter(
-        (iss) => iss.severity === "error" && iss.index === i,
-      );
-      let listen: JoinListen | null = null;
-      try {
-        listen = await previewJoin(working, i, hear);
-      } catch (e) {
-        notes = [e instanceof Error ? e.message : "preview failed"];
-      }
-      const fail = joinErrors.length > 0 || listen?.verdict === "fail";
-      if (!fail) {
+      const gate = await gateCandidate(outgoing, incoming, i, pick, hear);
+      const why = gate.errors.length
+        ? gate.errors.join("; ")
+        : gate.listen?.verdict === "fail"
+          ? (gate.listen.notes ?? []).join("; ")
+          : "";
+      if (gate.pass) {
         chosen = pick;
-        verdict = listen?.verdict ?? "skipped";
-        notes = listen?.notes ?? notes;
+        verdict = gate.listen?.verdict ?? "skipped";
+        notes = gate.listen?.notes ?? [];
         retries = c;
+        tries.push({ recipe: pick.recipe, bars: pick.bars, pass: true, why });
         break;
       }
       chosen = pick;
-      verdict = listen?.verdict ?? "fail";
-      notes = [
-        ...(listen?.notes ?? notes),
-        ...joinErrors.map((iss) => iss.message),
-      ];
+      verdict = gate.listen?.verdict ?? "fail";
+      notes = [...(gate.listen?.notes ?? []), ...gate.errors];
       retries = c;
+      tries.push({ recipe: pick.recipe, bars: pick.bars, pass: false, why });
     }
 
+    // Alternatives: other candidates that would also pass (scored cheap,
+    // waveform-only) — the model re-edits by index with these, not by bars.
+    const alternatives: Array<{ recipe: string; bars: number }> = [];
+    for (const pick of candidates) {
+      if (pick.recipe === chosen.recipe && pick.bars === chosen.bars) continue;
+      const gate = await gateCandidate(outgoing, incoming, i, pick, false);
+      if (gate.pass) alternatives.push({ recipe: pick.recipe, bars: pick.bars });
+    }
+    // Restore the chosen candidate after probing alternatives.
+    await gateCandidate(outgoing, incoming, i, chosen, false);
+
+    if (overrideNote) notes = [overrideNote, ...notes];
     joins.push({
       index: i,
       outgoing: outgoing.title,
@@ -540,19 +637,26 @@ export async function prepareSet(
       retries,
       verdict,
       notes,
+      tries,
+      alternatives,
+      commit: null,
+      override: Boolean(forced),
     });
   }
 
   const automation = tempoLanes(doc, arrangement);
   const probe: SetDoc = { ...doc, arrangement, automation };
   const verify = verifySet(probe, arrangement);
+  for (const j of joins) {
+    j.commit = joinCompileReport(probe, j.index);
+  }
 
   return {
     result: {
       intent: opts.intent?.trim() || null,
       inferred: {
         ...inferred,
-        reason: `${inferred.reason} ${plan.reason.replace(/\s*Joins unset[^.]*\./, "").trim()}`,
+        reason: `${inferred.reason} ${plan.reason.replace(/\s*Joins unset[^.]*\./, "").trim()}${orderNote}`,
       },
       cards,
       entries: arrangement.map((e, i) => ({

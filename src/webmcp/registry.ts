@@ -16,6 +16,8 @@ import type {
   TrackRole,
   TransitionType,
 } from "../types/setdoc";
+import { TRANSITION_TYPES } from "../types/setdoc";
+import { defaultTransitionBars, resolveTransition } from "../set/timeline";
 import { buildTimeline, setDurationBars } from "../set/timeline";
 import {
   applyRecipeBars,
@@ -27,8 +29,14 @@ import {
 } from "../set/builder";
 import {
   alignDropJoin,
+  alignEchoJoin,
+  alignTeaseJoin,
   crateHealth,
+  findDropBars,
+  findPeakDropBars,
+  inferStyle,
   isDropRecipe,
+  joinCompileReport,
   planSetArc,
   powerBlockTrims,
   tempoRelation,
@@ -40,7 +48,7 @@ import { assertToolMapped } from "./toolUiMap";
 import { findLyricMatches } from "../lyrics/lrclib";
 import { audioEngine } from "../audio/engine";
 import { phaseAlignBars } from "../audio/phaseAlign";
-import { getPlaybookPayload } from "../agent/djPlaybook";
+import { getPlaybookPayload, TRANSITION_RECIPES } from "../agent/djPlaybook";
 
 type LocalTool = ModelContextTool & {
   localExecute: (
@@ -98,14 +106,9 @@ function compactSession(doc: SetDoc) {
       energyLevel: doc.tracks[e.trackId]
         ? deriveEnergyLevel(doc.tracks[e.trackId]!)
         : null,
-      role:
-        doc.tracks[e.trackId]?.craft?.role ??
-        doc.tracks[e.trackId]?.analysis?.suggestedRole ??
-        null,
-      genre:
-        doc.tracks[e.trackId]?.craft?.genreHint ??
-        doc.tracks[e.trackId]?.analysis?.genreHint ??
-        null,
+      role: doc.tracks[e.trackId]?.craft?.role ?? null,
+      mood: doc.tracks[e.trackId]?.craft?.mood ?? null,
+      genre: doc.tracks[e.trackId]?.craft?.genreHint ?? null,
     })),
     automation: (doc.automation ?? []).map((l) => ({
       id: l.id,
@@ -180,9 +183,11 @@ function trackPayload(trackId: string, detail: "full" | "compact" = "full") {
         durationSec: Number(a.durationSec.toFixed(2)),
         energyMean: Number(a.energyMean.toFixed(3)),
         energyLevel: deriveEnergyLevel(track),
-        role: track.craft?.role ?? a.suggestedRole ?? null,
-        mood: track.craft?.mood ?? a.mood ?? null,
-        genreHint: track.craft?.genreHint ?? a.genreHint ?? null,
+        dropBars: a.dropBars ?? null,
+        heatInBars: a.heatInBars ?? null,
+        brightness: a.brightness ?? null,
+        mood: track.craft?.mood ?? null,
+        genre: track.craft?.genreHint ?? null,
         vocalLead: Boolean(a.vocalLead),
         sectionCount: a.sections.length,
         vocalRegionCount: a.vocalRegions?.length ?? 0,
@@ -203,9 +208,11 @@ function trackPayload(trackId: string, detail: "full" | "compact" = "full") {
       durationSec: Number(a.durationSec.toFixed(2)),
       energyMean: Number(a.energyMean.toFixed(3)),
       energyLevel: deriveEnergyLevel(track),
-      role: track.craft?.role ?? a.suggestedRole ?? null,
-      mood: track.craft?.mood ?? a.mood ?? null,
-      genreHint: track.craft?.genreHint ?? a.genreHint ?? null,
+      dropBars: a.dropBars ?? null,
+      heatInBars: a.heatInBars ?? null,
+      brightness: a.brightness ?? null,
+      mood: track.craft?.mood ?? null,
+      genre: track.craft?.genreHint ?? null,
       vocalLead: Boolean(a.vocalLead),
       energy: a.energy.map((v) => Number(v.toFixed(3))),
       sections: a.sections.map((s) => ({
@@ -235,37 +242,12 @@ function trackPayload(trackId: string, detail: "full" | "compact" = "full") {
   };
 }
 
-const TRANSITIONS: TransitionType[] = [
-  "cut",
-  "blend",
-  "eq_swap",
-  "filter_sweep",
-  "echo_out",
-  "loop_out",
-  "build_cut",
-  "drop_swap",
-  "double_drop",
-  "loop_roll",
-  "backspin",
-  "hook_layer",
+/** Anything a model may legally write into a `transition` field: bare types
+ *  AND recipe aliases (power_cut, bass_swap, half_bridge, power_block). */
+const TRANSITION_OR_RECIPE: string[] = [
+  ...TRANSITION_TYPES,
+  ...TRANSITION_RECIPES,
 ];
-
-const RECIPE_ENUM = [
-  "drop_swap",
-  "double_drop",
-  "power_cut",
-  "build_cut",
-  "bass_swap",
-  "eq_swap",
-  "filter_sweep",
-  "echo_out",
-  "loop_out",
-  "loop_roll",
-  "backspin",
-  "hook_layer",
-  "half_bridge",
-  "power_block",
-] as const;
 
 const AUTOMATION_PARAMS: AutomationParam[] = [
   "tempo",
@@ -307,17 +289,23 @@ function parseEntries(raw: unknown): ArrangementEntry[] {
     if (!Number.isFinite(inBars) || !Number.isFinite(outBars) || outBars <= inBars) {
       throw new Error(`entries[${i}]: in_bars/out_bars invalid`);
     }
-    const tRaw = String(row.transition ?? "blend");
-    const transition = (TRANSITIONS.includes(tRaw as TransitionType)
-      ? tRaw
-      : "blend") as TransitionType;
-    const bars = Number(row.bars ?? row.transition_bars ?? 8);
+    const tRaw = row.transition ?? row.recipe;
+    const resolved = tRaw != null ? resolveTransition(tRaw) : null;
+    if (tRaw != null && !resolved) {
+      throw new Error(
+        `entries[${i}]: transition "${String(tRaw)}" is not a type or a recipe. Types: ${TRANSITION_TYPES.join(", ")}. Recipes: ${TRANSITION_RECIPES.join(", ")} (recipes compile via apply_transition_recipe).`,
+      );
+    }
+    const type = resolved?.type ?? "blend";
+    const bars = Number(
+      row.bars ?? row.transition_bars ?? defaultTransitionBars(type),
+    );
     return {
       id: crypto.randomUUID(),
       trackId,
       inBars,
       outBars,
-      transition: { type: transition, bars: Number.isFinite(bars) ? bars : 8 },
+      transition: { type, bars: Number.isFinite(bars) && bars > 0 ? bars : 8 },
     };
   });
 }
@@ -368,7 +356,8 @@ export function buildCoreTools() {
   defineTool({
     name: "search_library",
     title: "Search library",
-    description: "Search tracks by title/artist with optional BPM and Camelot filters.",
+    description:
+      "List/filter library tracks by title/artist, BPM range, or Camelot key (e.g. 8A). Paginated: limit (default 25, max 100) + offset; response includes total and has_more — keep paging until has_more is false instead of guessing the rest.",
     inputSchema: {
       type: "object",
       properties: {
@@ -376,12 +365,14 @@ export function buildCoreTools() {
         bpm_min: { type: "number" },
         bpm_max: { type: "number" },
         key: { type: "string" },
+        limit: { type: "number" },
+        offset: { type: "number" },
       },
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, untrustedContentHint: true },
-    execute: async (input) => searchTracks(input),
-    localExecute: async (input) => toolOk({ tracks: searchTracks(input) }),
+    execute: async (input) => searchLibrary(input),
+    localExecute: async (input) => toolOk(searchLibrary(input)),
   });
 
   defineTool({
@@ -449,7 +440,7 @@ export function buildCoreTools() {
     name: "get_dj_playbook",
     title: "Get DJ playbook",
     description:
-      "Facts: what recipes compile, verify error codes, Camelot/BPM refs. Does not pick a join. Optional topic=all|recipes|verify.",
+      "The rulebook: chop formula first (INTRO→UP+→DROP→[DOWN]→DROP+→OUTRO), then what each recipe compiles, verify error codes, Camelot/BPM refs. Read it once before your first set.",
     inputSchema: {
       type: "object",
       properties: {
@@ -469,7 +460,7 @@ export function buildCoreTools() {
     name: "get_mix_points",
     title: "Get mix points",
     description:
-      "Phrase candidates: drop, 8/16 bars before drop, breakdown, mix-in/out, grid. Prefer phraseBars. You choose.",
+      "Phrase candidates: peak drop, 8/16 before that drop, vocal_end, safe_leave, breakdown, mix-in/out, grid. Prefer phraseBars. Leave on safe_leave, not mid-line.",
     inputSchema: {
       type: "object",
       properties: { track_id: { type: "string" } },
@@ -501,7 +492,7 @@ export function buildCoreTools() {
     name: "verify_set",
     title: "Verify set",
     description:
-      "Craft gate before set_propose. Returns ready + issues (double-bass, wash transitions, missing tempo ramp, echo without FX). Fix errors until ready:true.",
+      "Craft gate — run before proposing/applying and after any rewrite. ready:true means no broken automation. Errors (must fix): double-bass on a blend, echo without FX, mid-vocal leave, key-unknown pad, overlap past the Camelot cap, |ΔBPM|>3 without a tempo lane, unknown transition type. echo_out / cut / backspin do not share a clock and do not need a tempo ramp. Warnings are observations — keep them if you meant it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -524,14 +515,14 @@ export function buildCoreTools() {
     name: "apply_transition_recipe",
     title: "Apply transition recipe",
     description:
-      "Compile a join you chose on incoming entry (index≥1). Drop recipes also park incoming at drop−N and outgoing leave on its drop.",
+      "Compile a join you chose on incoming entry (index≥1). tease_slam (the chop default) parks incoming at drop−bars so its build teases in filtered under the outgoing, rides the tempo lane across the window, then roll + throw and the slam on the 1. drop_swap parks incoming at drop−8 (the build), leaves after the vocal line, then peels. power_cut / backspin / air_cut park incoming on its drop. air_cut = suck-out, one bar of dead air, slam — no shared clock. echo_out = echo-throw leave (dry holds, delay fills, cut on the 1; incoming from its drop/heat, never bar 0, no tempo ramp). Never pad-blend two vocal leads; only half/double-time records still air-slam. The result echoes the parked trims and the compiled commit (commit_bars, commit_on_drop) — trust that echo over your own bar math.",
     inputSchema: {
       type: "object",
       properties: {
         index: { type: "number" },
         recipe: {
           type: "string",
-          enum: [...RECIPE_ENUM],
+          enum: [...TRANSITION_RECIPES],
         },
         bars: { type: "number" },
       },
@@ -552,7 +543,7 @@ export function buildCoreTools() {
     name: "get_crate_health",
     title: "Crate health",
     description:
-      "Library coverage plus crate cards (drop/hole/vocals/energy). Call before prepare_set or plan_set_arc.",
+      "START HERE before composing a set. Cards carry MEASURED facts only: bpm, bpm_lane, key+confidence (a ? means untrusted), energy, brightness, drop/heat/hole/safe_leave, vocals, cue_before_drop_8/16. mood and genre are MusicBrainz or tag_track — never DSP. Roles are craft-only. Next step: prepare_set (chop formula by default).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     execute: async () =>
@@ -592,12 +583,29 @@ export function buildCoreTools() {
     name: "prepare_set",
     title: "Prepare set",
     description:
-      "Autonomous first draft from crate cards: infer the night (optional one-line intent), order tracks, pick each join from those two files, hear/verify, retry broken joins, write a playable arrangement. Empty intent is allowed.",
+      "Default action for 'make me a set'. Chop formula: INTRO→UP+→DROP→[DOWN]→DROP+→OUTRO. 16–32 bar heat/drop clips, sudden entries, never intros. Default join: tease_slam — the incoming build teases in filtered under the outgoing, the tempo lane rides the BPM gap, roll + throw, slam on the 1 (loop_roll / backspin / power_cut for variety and no-drop cases; no two identical slams in a row). Blend + echo only when intent is chill/deep/warm-up/smooth. The engine owns bar math — you never compute in_bars/out_bars. Options: intent; track_count; order; join_overrides; apply (default true); hear (default true). Rewrite any join with apply_transition_recipe, then verify_set.",
     inputSchema: {
       type: "object",
       properties: {
         intent: { type: "string" },
         track_count: { type: "number" },
+        order: {
+          type: "array",
+          items: { type: "string" },
+          description: "Explicit track_ids in play order; omit for auto arc",
+        },
+        join_overrides: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              index: { type: "number" },
+              recipe: { type: "string", enum: [...TRANSITION_RECIPES] },
+              bars: { type: "number" },
+            },
+            required: ["index"],
+          },
+        },
         hear: { type: "boolean" },
         apply: { type: "boolean" },
       },
@@ -617,7 +625,7 @@ export function buildCoreTools() {
     name: "preview_join",
     title: "Preview join",
     description:
-      "Listen-score a join (index ≥ 1): phrase, Camelot, BPM, bass/mid, drop positions. Verdict is an ear, not a recipe pick.",
+      "Listen-score a join (index ≥ 1) — the ear you lack. Auditions the ACTUAL overlap windows from the stored chroma (harmony.blend_ok / bass_only / clash): measured audio beats the Camelot label. echo_out is scored as a leave (incoming is not in the window). Isolator recipes are not failed for raw-file bass or a guessed key. Fails mid-vocal leave, measured-clash pad blends, and pad blends that break the cap. Returns drops/cues plus the compiled commit (commit_bars, commit_on_drop): on a drop recipe the commit must land on the incoming drop's 1, otherwise your cue math drifted.",
     inputSchema: {
       type: "object",
       properties: {
@@ -645,7 +653,7 @@ export function buildCoreTools() {
     name: "tag_track",
     title: "Tag track craft",
     description:
-      "Set human/agent craft overrides: role opener|builder|bridge|peak|reset|closer, energyLevel 1–10, mood, genreHint.",
+      "You are the curator of mood, genre, and role. The detector measures audio (bpm, energy, brightness, drop) but cannot know a euphoric anthem from a minor key. MusicBrainz may fill genre on import; override here (genreSource=agent). Also: role opener|builder|bridge|peak|reset|closer, energyLevel 1–10.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1222,6 +1230,36 @@ export function buildCoreTools() {
   });
 
   defineTool({
+    name: "set_cue",
+    title: "Channel cue",
+    description:
+      "Arm channel Cue (PFL). Any armed Cue solos those channels to master (web has no separate phones out).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deck: { type: "string", enum: ["A", "B", "C", "D"] },
+        enabled: { type: "boolean" },
+      },
+      required: ["deck", "enabled"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      const deck = deckId(input.deck);
+      if (!deck) throw new Error("invalid deck");
+      const enabled = Boolean(input.enabled);
+      dispatch({ type: "mixer.setCue", deck, enabled });
+      return { deck, enabled };
+    },
+    localExecute: async (input) => {
+      const deck = deckId(input.deck);
+      if (!deck) return toolErr("invalid deck");
+      const enabled = Boolean(input.enabled);
+      dispatch({ type: "mixer.setCue", deck, enabled });
+      return toolOk({ deck, enabled });
+    },
+  });
+
+  defineTool({
     name: "set_crossfader",
     title: "Set crossfader",
     description: "Crossfader -1 (A) .. +1 (B).",
@@ -1270,47 +1308,31 @@ export function buildCoreTools() {
     name: "set_insert_track",
     title: "Insert track",
     description:
-      "Insert a track into the working arrangement at index. You choose in_bars and out_bars from get_track sections/grid.",
+      "Insert a track into the working arrangement at index. Prefer cue parking over raw bars: cue = auto | drop | mix_in | <bars>. 'auto' parks from the join compiler (incoming N bars before its drop for swap recipes, on the drop for cuts, drop/heat for echo) and 'drop'/'mix_in' pick that cue explicitly. Raw in_bars/out_bars still work but are NOT phrase-snapped — verify_set will flag off-grid bars. transition accepts types (cut, drop_swap, …) or recipe names (power_cut, bass_swap, half_bridge, power_block). Result echoes the parked entry and, for index ≥ 1, where the compiled xfader commit lands (commit_on_drop).",
     inputSchema: {
       type: "object",
       properties: {
         index: { type: "number" },
         track_id: { type: "string" },
+        cue: {
+          type: ["string", "number"],
+          description: "auto | drop | mix_in | bars — parking handled by the compiler",
+        },
         in_bars: { type: "number" },
         out_bars: { type: "number" },
-        transition: { type: "string", enum: TRANSITIONS },
+        transition: { type: "string", enum: TRANSITION_OR_RECIPE },
         bars: { type: "number" },
       },
-      required: ["index", "track_id", "in_bars", "out_bars"],
+      required: ["index", "track_id"],
       additionalProperties: false,
     },
-    execute: async (input) => {
-      const trackId = String(input.track_id);
-      if (!getDoc().tracks[trackId]) throw new Error("track not found");
-      dispatch({
-        type: "set.insert",
-        index: Number(input.index),
-        trackId,
-        inBars: Number(input.in_bars),
-        outBars: Number(input.out_bars),
-        transition: input.transition as TransitionType | undefined,
-        bars: input.bars != null ? Number(input.bars) : undefined,
-      });
-      return { arrangementLength: getDoc().arrangement.length };
-    },
+    execute: async (input) => insertTrackExec(input),
     localExecute: async (input) => {
-      const trackId = String(input.track_id);
-      if (!getDoc().tracks[trackId]) return toolErr("track not found");
-      dispatch({
-        type: "set.insert",
-        index: Number(input.index),
-        trackId,
-        inBars: Number(input.in_bars),
-        outBars: Number(input.out_bars),
-        transition: input.transition as TransitionType | undefined,
-        bars: input.bars != null ? Number(input.bars) : undefined,
-      });
-      return toolOk({ arrangementLength: getDoc().arrangement.length });
+      try {
+        return toolOk(insertTrackExec(input));
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "insert failed");
+      }
     },
   });
 
@@ -1368,7 +1390,8 @@ export function buildCoreTools() {
   defineTool({
     name: "set_set_trim",
     title: "Set trim",
-    description: "Set in_bars/out_bars for an arrangement entry. You pick bars from analysis.",
+    description:
+      "Set in_bars/out_bars for an arrangement entry. Bars within ±1 of the 8-bar phrase grid are auto-snapped to it (a 71 becomes 72) — off-phrase commits are the #1 'beats don't match' complaint. Values further off-grid pass through untouched and verify_set will flag them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1379,57 +1402,38 @@ export function buildCoreTools() {
       required: ["index", "in_bars", "out_bars"],
       additionalProperties: false,
     },
-    execute: async (input) => {
-      dispatch({
-        type: "set.setTrim",
-        index: Number(input.index),
-        inBars: Number(input.in_bars),
-        outBars: Number(input.out_bars),
-      });
-      return getDoc().arrangement[Number(input.index)] ?? null;
-    },
+    execute: async (input) => setTrimExec(input),
     localExecute: async (input) => {
-      dispatch({
-        type: "set.setTrim",
-        index: Number(input.index),
-        inBars: Number(input.in_bars),
-        outBars: Number(input.out_bars),
-      });
-      return toolOk({ entry: getDoc().arrangement[Number(input.index)] });
+      try {
+        return toolOk(setTrimExec(input));
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "trim failed");
+      }
     },
   });
 
   defineTool({
     name: "set_set_transition",
     title: "Set transition",
-    description: "Set transition type and length in bars into the entry at index.",
+    description:
+      "Set the join INTO the entry at index (index ≥ 1). Accepts transition types (cut, blend, drop_swap, echo_out, …) or recipe names (power_cut, bass_swap, half_bridge, power_block — resolved to their types). Prefer apply_transition_recipe for recipes: it also parks the cue bars. Result echoes the compiled commit (commit_bars on the set clock, commit_on_drop) — if commit_on_drop is false on a drop recipe, your cue math drifted from the recipe shape.",
     inputSchema: {
       type: "object",
       properties: {
         index: { type: "number" },
-        type: { type: "string", enum: TRANSITIONS },
+        type: { type: "string", enum: TRANSITION_OR_RECIPE },
         bars: { type: "number" },
       },
       required: ["index", "type"],
       additionalProperties: false,
     },
-    execute: async (input) => {
-      dispatch({
-        type: "set.setTransition",
-        index: Number(input.index),
-        transition: input.type as TransitionType,
-        bars: input.bars != null ? Number(input.bars) : undefined,
-      });
-      return getDoc().arrangement[Number(input.index)] ?? null;
-    },
+    execute: async (input) => setTransitionExec(input),
     localExecute: async (input) => {
-      dispatch({
-        type: "set.setTransition",
-        index: Number(input.index),
-        transition: input.type as TransitionType,
-        bars: input.bars != null ? Number(input.bars) : undefined,
-      });
-      return toolOk({ entry: getDoc().arrangement[Number(input.index)] });
+      try {
+        return toolOk(setTransitionExec(input));
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "transition failed");
+      }
     },
   });
 
@@ -1464,7 +1468,8 @@ export function buildCoreTools() {
               track_id: { type: "string" },
               in_bars: { type: "number" },
               out_bars: { type: "number" },
-              transition: { type: "string", enum: TRANSITIONS },
+              transition: { type: "string", enum: TRANSITION_OR_RECIPE },
+              recipe: { type: "string", enum: [...TRANSITION_RECIPES] },
               bars: { type: "number" },
             },
             required: ["track_id", "in_bars", "out_bars"],
@@ -1628,6 +1633,70 @@ export function buildCoreTools() {
     localExecute: async () => {
       dispatch({ type: "set.clearAutomation" });
       return toolOk({ cleared: true });
+    },
+  });
+
+  defineTool({
+    name: "download_set",
+    title: "Download set WAV",
+    description:
+      "Offline-bounce the arrangement (transitions + automation) to a WAV file and download it. Same as TopBar Download. Does not use the live Rec bus.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filename: { type: "string", description: "Optional base filename without extension" },
+      },
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      const doc = getDoc();
+      if (!doc.arrangement.length) throw new Error("empty arrangement");
+      const { downloadSetWav } = await import("../audio/renderSet");
+      const name =
+        typeof input.filename === "string" && input.filename.trim()
+          ? input.filename.trim()
+          : doc.title;
+      useSetStore.getState().setActivity("Bouncing set to WAV…");
+      const result = await downloadSetWav(doc, name, (p, label) => {
+        useSetStore.getState().setActivity(`${label} ${Math.round(p * 100)}%`);
+      });
+      useSetStore
+        .getState()
+        .setActivity(`Downloaded WAV · ${result.durationSec.toFixed(0)}s`);
+      return {
+        ok: true,
+        durationSec: result.durationSec,
+        bytes: result.bytes,
+        sampleRate: result.sampleRate,
+        format: "wav",
+      };
+    },
+    localExecute: async (input) => {
+      const doc = getDoc();
+      if (!doc.arrangement.length) return toolErr("empty arrangement");
+      try {
+        const { downloadSetWav } = await import("../audio/renderSet");
+        const name =
+          typeof input.filename === "string" && input.filename.trim()
+            ? input.filename.trim()
+            : doc.title;
+        useSetStore.getState().setActivity("Bouncing set to WAV…");
+        const result = await downloadSetWav(doc, name, (p, label) => {
+          useSetStore.getState().setActivity(`${label} ${Math.round(p * 100)}%`);
+        });
+        useSetStore
+          .getState()
+          .setActivity(`Downloaded WAV · ${result.durationSec.toFixed(0)}s`);
+        return toolOk({
+          ok: true,
+          durationSec: result.durationSec,
+          bytes: result.bytes,
+          sampleRate: result.sampleRate,
+          format: "wav",
+        });
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "download failed");
+      }
     },
   });
 
@@ -1989,14 +2058,45 @@ function applyRecipeExec(input: Record<string, unknown>) {
     bars: applied.bars,
   });
 
-  if (index > 0 && (isDropRecipe(recipe) || recipe === "backspin")) {
+  if (index > 0 && recipe === "tease_slam") {
+    // Tease parking: incoming at drop−bars so the drop lands on the commit.
     const live = getDoc();
     const prev = live.arrangement[index - 1]!;
     const cur = live.arrangement[index]!;
     const ta = live.tracks[prev.trackId];
     const tb = live.tracks[cur.trackId];
     if (ta && tb) {
-      const mode = recipe === "power_cut" || recipe === "backspin" ? "cut" : "swap";
+      const aligned = alignTeaseJoin(ta, tb, applied.bars);
+      // Host the full tease plus a solo lead-in (same rule as prepare_set) —
+      // a vocal wall may have collapsed the safe leave.
+      const durOut = Math.max(8, ta.analysis?.durationBars ?? 32);
+      const need = prev.inBars + applied.bars + 8;
+      const outBars =
+        aligned.outBars < need ? Math.min(durOut, Math.ceil(need / 8) * 8) : aligned.outBars;
+      dispatch({
+        type: "set.setTrim",
+        index: index - 1,
+        inBars: prev.inBars,
+        outBars,
+      });
+      dispatch({
+        type: "set.setTrim",
+        index,
+        inBars: aligned.inBars,
+        outBars: cur.outBars,
+      });
+    }
+  } else if (index > 0 && (isDropRecipe(recipe) || recipe === "backspin")) {
+    const live = getDoc();
+    const prev = live.arrangement[index - 1]!;
+    const cur = live.arrangement[index]!;
+    const ta = live.tracks[prev.trackId];
+    const tb = live.tracks[cur.trackId];
+    if (ta && tb) {
+      const mode =
+        recipe === "power_cut" || recipe === "backspin" || recipe === "air_cut" || recipe === "loop_roll"
+          ? "cut"
+          : "swap";
       const aligned = alignDropJoin(ta, tb, applied.bars, mode);
       dispatch({
         type: "set.setTrim",
@@ -2011,10 +2111,69 @@ function applyRecipeExec(input: Record<string, unknown>) {
         outBars: cur.outBars,
       });
     }
+  } else if (index > 0 && (recipe === "echo_out" || recipe === "half_bridge")) {
+    const live = getDoc();
+    const prev = live.arrangement[index - 1]!;
+    const cur = live.arrangement[index]!;
+    const ta = live.tracks[prev.trackId];
+    const tb = live.tracks[cur.trackId];
+    if (ta && tb) {
+      const aligned = alignEchoJoin(ta, tb, applied.bars);
+      dispatch({
+        type: "set.setTrim",
+        index: index - 1,
+        inBars: prev.inBars,
+        outBars: aligned.outBars,
+      });
+      dispatch({
+        type: "set.setTrim",
+        index,
+        inBars: aligned.inBars,
+        outBars: cur.outBars,
+      });
+    }
+    dispatch({ type: "set.setTempo", bpm: null });
+    const tempoIds = getDoc()
+      .automation.filter((l) => l.param === "tempo")
+      .map((l) => l.id);
+    for (const id of tempoIds) {
+      dispatch({ type: "set.removeAutomation", id });
+    }
   }
 
-  // Auto tempo ramp across the join when BPMs disagree
-  if (index > 0) {
+  // Slam recipes share no clock — clear any tempo lanes touching this join
+  // (targeted: other joins' ramps further down the set survive).
+  if (index > 0 && (recipe === "air_cut" || recipe === "backspin")) {
+    const live = getDoc();
+    const spans = buildTimeline(live);
+    const span = spans[index];
+    const prevSpan = spans[index - 1];
+    if (span && prevSpan) {
+      const joinStart = span.setStart;
+      const joinEnd = prevSpan.setEnd + 2;
+      const stale = live.automation.filter(
+        (l) =>
+          l.param === "tempo" && l.endBars > joinStart && l.startBars < joinEnd,
+      );
+      for (const lane of stale) {
+        dispatch({ type: "set.removeAutomation", id: lane.id });
+      }
+    }
+    dispatch({ type: "set.setTempo", bpm: null });
+  }
+
+  // Tempo ramp only when the join actually shares a clock.
+  const sequential =
+    recipe === "echo_out" ||
+    recipe === "half_bridge" ||
+    recipe === "power_cut" ||
+    recipe === "backspin" ||
+    recipe === "air_cut" ||
+    applied.type === "echo_out" ||
+    applied.type === "air_cut" ||
+    applied.type === "cut" ||
+    applied.type === "backspin";
+  if (index > 0 && !sequential) {
     const prev = doc.arrangement[index - 1]!;
     const cur = doc.arrangement[index]!;
     const bpmA = doc.tracks[prev.trackId]?.analysis?.bpm;
@@ -2046,6 +2205,12 @@ function applyRecipeExec(input: Record<string, unknown>) {
     }
   }
 
+  // A ride bends pitch without keylock — force it on both decks.
+  if (index > 0 && (recipe === "tempo_ride" || applied.type === "tempo_ride")) {
+    dispatch({ type: "deck.setOptions", deck: "A", keylock: true });
+    dispatch({ type: "deck.setOptions", deck: "B", keylock: true });
+  }
+
   const live = getDoc();
   const entry = live.arrangement[index]!;
   const prev = index > 0 ? live.arrangement[index - 1] : undefined;
@@ -2059,10 +2224,191 @@ function applyRecipeExec(input: Record<string, unknown>) {
   };
 }
 
+function transitionInputError(raw: unknown): string {
+  return `"${String(raw)}" is not a transition type or recipe. Types: ${TRANSITION_TYPES.join(", ")}. Recipes: ${TRANSITION_RECIPES.join(", ")}.`;
+}
+
+/** Bars within ±1 of the phrase grid snap to it — off-phrase commits are the
+ *  classic "beats don't match" bug even when beat-quantize fixes the beat. */
+function snapPhraseSoft(bars: number): { bars: number; snappedFrom: number | null } {
+  if (!Number.isFinite(bars) || bars <= 0) return { bars, snappedFrom: null };
+  const snapped = snapToPhrase(bars);
+  if (snapped > 0 && snapped !== bars && Math.abs(snapped - bars) <= 1) {
+    return { bars: snapped, snappedFrom: bars };
+  }
+  return { bars, snappedFrom: null };
+}
+
+function setTrimExec(input: Record<string, unknown>) {
+  const index = Number(input.index);
+  const inRaw = Number(input.in_bars);
+  const outRaw = Number(input.out_bars);
+  if (!Number.isFinite(inRaw) || !Number.isFinite(outRaw) || outRaw <= inRaw) {
+    throw new Error("in_bars/out_bars invalid");
+  }
+  const inS = snapPhraseSoft(inRaw);
+  const outS = snapPhraseSoft(outRaw);
+  dispatch({
+    type: "set.setTrim",
+    index,
+    inBars: inS.bars,
+    outBars: Math.max(inS.bars + 1, outS.bars),
+  });
+  const entry = getDoc().arrangement[index] ?? null;
+  const snapped: string[] = [];
+  if (inS.snappedFrom != null) snapped.push(`in_bars ${inS.snappedFrom} → ${inS.bars}`);
+  if (outS.snappedFrom != null) snapped.push(`out_bars ${outS.snappedFrom} → ${outS.bars}`);
+  return {
+    entry,
+    snapped: snapped.length ? snapped : undefined,
+  };
+}
+
+function setTransitionExec(input: Record<string, unknown>) {
+  const index = Number(input.index);
+  const resolved = resolveTransition(input.type);
+  if (!resolved) throw new Error(transitionInputError(input.type));
+  if (!getDoc().arrangement[index]) throw new Error("invalid index");
+  dispatch({
+    type: "set.setTransition",
+    index,
+    transition: resolved.type,
+    bars: input.bars != null ? Number(input.bars) : undefined,
+  });
+  const live = getDoc();
+  const entry = live.arrangement[index]!;
+  return {
+    index,
+    requested: resolved.name,
+    resolved_via: resolved.via,
+    transition: entry.transition,
+    compile: joinCompileReport(live, index),
+    note:
+      resolved.via === "recipe"
+        ? "Recipe accepted as a type alias — apply_transition_recipe also parks cue bars; prefer it for recipes."
+        : undefined,
+  };
+}
+
+function insertTrackExec(input: Record<string, unknown>) {
+  const index = Number(input.index);
+  const trackId = String(input.track_id);
+  const doc = getDoc();
+  const track = doc.tracks[trackId];
+  if (!track) throw new Error("track not found");
+  const resolved =
+    input.transition != null ? resolveTransition(input.transition) : null;
+  if (input.transition != null && !resolved) {
+    throw new Error(`transition ${transitionInputError(input.transition)}`);
+  }
+  const type: TransitionType = resolved?.type ?? "blend";
+  const bars =
+    input.bars != null ? Number(input.bars) : defaultTransitionBars(type);
+
+  // Cue parking: let the compiler choose bars unless the caller insisted.
+  const rawBarsGiven = input.in_bars != null || input.out_bars != null;
+  let inBars: number;
+  let outBars: number;
+  const dur = Math.max(8, track.analysis?.durationBars ?? 32);
+  const cueRaw = input.cue;
+  const cue: "auto" | "drop" | "mix_in" | null =
+    cueRaw === "auto" || cueRaw === "drop" || cueRaw === "mix_in" ? cueRaw : null;
+  const cueBars = cueRaw != null && !cue ? Number(cueRaw) : null;
+
+  if (rawBarsGiven || (cue == null && cueBars == null)) {
+    const rawIn = input.in_bars != null ? Number(input.in_bars) : 0;
+    const rawOut = input.out_bars != null ? Number(input.out_bars) : dur;
+    inBars = snapPhraseSoft(rawIn).bars;
+    outBars = snapPhraseSoft(rawOut).bars;
+  } else {
+    const prevEntry = doc.arrangement[Math.max(0, index - 1)];
+    const prevTrack = prevEntry && index > 0 ? doc.tracks[prevEntry.trackId] : undefined;
+    const drop = findPeakDropBars(track) ?? findDropBars(track);
+    const points = getMixPoints(track);
+    const mixIn =
+      points.find((p) => p.role === "mix_in" && p.phraseBars > 0)?.phraseBars ?? 0;
+    if (cueBars != null) {
+      inBars = snapToPhrase(Math.max(0, cueBars));
+    } else if (cue === "mix_in" || index === 0) {
+      inBars = cue === "drop" ? (drop != null ? drop : mixIn) : mixIn;
+    } else if (cue === "drop") {
+      inBars =
+        drop != null
+          ? type === "cut" || type === "backspin"
+            ? drop
+            : snapToPhrase(Math.max(0, drop - bars))
+          : mixIn;
+    } else {
+      // auto: park against the previous entry like the recipe compiler would
+      if (type === "echo_out") {
+        inBars = prevTrack
+          ? alignEchoJoin(prevTrack, track, bars).inBars
+          : drop != null
+            ? drop
+            : 0;
+      } else if (prevTrack && type === "tease_slam") {
+        inBars = alignTeaseJoin(prevTrack, track, bars).inBars;
+      } else if (prevTrack && (isDropRecipe(resolved?.name ?? type) || type === "backspin")) {
+        const mode = type === "cut" || type === "backspin" ? "cut" : "swap";
+        inBars = alignDropJoin(prevTrack, track, bars, mode).inBars;
+      } else if (drop != null) {
+        inBars = snapToPhrase(Math.max(0, drop - bars));
+      } else {
+        inBars = mixIn;
+      }
+    }
+    inBars = Math.max(0, Math.min(inBars, Math.max(0, dur - 8)));
+    outBars = dur;
+  }
+
+  if (!Number.isFinite(inBars) || !Number.isFinite(outBars) || outBars <= inBars) {
+    throw new Error("in_bars/out_bars invalid");
+  }
+
+  dispatch({
+    type: "set.insert",
+    index,
+    trackId,
+    inBars,
+    outBars,
+    transition: type,
+    bars,
+  });
+
+  const live = getDoc();
+  const entry = live.arrangement[index];
+  return {
+    index,
+    entry,
+    parked: !rawBarsGiven,
+    compile: index >= 1 ? joinCompileReport(live, index) : null,
+    next:
+      index >= 1
+        ? `preview_join index ${index} to score the join, or apply_transition_recipe index ${index} to recompile it.`
+        : "insert the next track to create a join.",
+  };
+}
+
 async function prepareSetExec(input: Record<string, unknown>) {
+  const order =
+    Array.isArray(input.order) ?
+      input.order.map((id) => String(id)).filter(Boolean)
+    : undefined;
+  const joinOverrides = Array.isArray(input.join_overrides)
+    ? input.join_overrides.map((row) => {
+        const o = row as Record<string, unknown>;
+        return {
+          index: Number(o.index),
+          recipe: o.recipe != null ? String(o.recipe) : undefined,
+          bars: o.bars != null ? Number(o.bars) : undefined,
+        };
+      })
+    : undefined;
   const prepared = await prepareSet(getDoc(), {
     intent: input.intent != null ? String(input.intent) : undefined,
     trackCount: input.track_count != null ? Number(input.track_count) : undefined,
+    order,
+    joinOverrides,
     hear: input.hear !== false,
   });
   const apply = input.apply !== false;
@@ -2070,8 +2416,13 @@ async function prepareSetExec(input: Record<string, unknown>) {
     return { ...prepared.result, applied: false, proposed: false };
   }
   if (apply) {
+    dispatch({ type: "set.setTempo", bpm: null });
     dispatch({ type: "set.replaceArrangement", entries: prepared.arrangement });
     dispatch({ type: "set.replaceAutomation", lanes: prepared.automation });
+    if (prepared.result.joins.some((j) => j.recipe === "tempo_ride")) {
+      dispatch({ type: "deck.setOptions", deck: "A", keylock: true });
+      dispatch({ type: "deck.setOptions", deck: "B", keylock: true });
+    }
     useSetStore.getState().setRail("set");
     return { ...prepared.result, applied: true, proposed: false };
   }
@@ -2104,6 +2455,7 @@ async function planArcExec(input: Record<string, unknown>) {
     getDoc(),
     arc,
     input.track_count != null ? Number(input.track_count) : undefined,
+    inferStyle(undefined, arc),
   );
   if (input.apply === true && plan.entries.length >= 2) {
     await proposeFromInput({
@@ -2129,7 +2481,10 @@ function tagTrackExec(input: Record<string, unknown>) {
     craft.energyLevel = Math.max(1, Math.min(10, Math.round(Number(input.energy_level))));
   }
   if (input.mood != null) craft.mood = String(input.mood) as TrackMood;
-  if (input.genre_hint != null) craft.genreHint = String(input.genre_hint);
+  if (input.genre_hint != null) {
+    craft.genreHint = String(input.genre_hint);
+    craft.genreSource = "agent";
+  }
   dispatch({ type: "library.setCraft", trackId, craft });
   const t = getDoc().tracks[trackId]!;
   return { trackId, craft: t.craft };
@@ -2147,12 +2502,16 @@ function prepHotcuesExec(input: Record<string, unknown>) {
   const pick = (role: string) =>
     points.find((p) => p.role === role && p.phraseBars < dur - 0.5)?.phraseBars;
   const clampBars = (b: number) => Math.max(0, Math.min(b, Math.max(0, dur - 0.125)));
-  const drop = pick("drop") ?? pick("phrase") ?? Math.min(16, Math.max(0, dur * 0.35));
+  const dropPts = points.filter((p) => p.role === "drop");
+  const drop =
+    (dropPts.length
+      ? dropPts.reduce((best, p) => (p.energy > best.energy ? p : best)).phraseBars
+      : pick("phrase")) ?? Math.min(16, Math.max(0, dur * 0.35));
   const cues = [
     pick("mix_in") ?? 0,
     snapToPhrase(Math.max(0, drop - 16)),
     drop,
-    pick("mix_out") ?? Math.max(0, dur - 8),
+    pick("safe_leave") ?? pick("vocal_end") ?? pick("mix_out") ?? Math.max(0, dur - 8),
   ].map(clampBars);
   cues.forEach((bars, i) => {
     dispatch({ type: "deck.setHotcue", deck, pad: i + 1, bars });
@@ -2374,43 +2733,133 @@ async function hotcueExec(input: Record<string, unknown>) {
   throw new Error("action must be set|trigger|clear");
 }
 
-function searchTracks(input: Record<string, unknown>) {
+function searchTrackRow(t: SetDoc["tracks"][string]) {
+  // Compact row: drop nulls and the sections list (get_track / get_mix_points own that).
+  const row: Record<string, unknown> = {
+    id: t.id,
+    title: t.title,
+    artist: t.artist,
+    bpm: t.analysis?.bpm ?? null,
+    key: t.analysis?.key.camelot ?? null,
+    keyTrusted:
+      t.analysis?.key.confidence != null &&
+      t.analysis.key.confidence >= 0.55,
+    energyLevel: deriveEnergyLevel(t),
+    role: t.craft?.role ?? null,
+    genre: t.craft?.genreHint ?? null,
+    vocalLead: Boolean(t.analysis?.vocalLead),
+    durationBars:
+      t.analysis?.durationBars != null
+        ? Number(t.analysis.durationBars.toFixed(1))
+        : null,
+    status: t.analysisStatus,
+  };
+  for (const k of Object.keys(row)) {
+    if (row[k] === null || row[k] === undefined) delete row[k];
+  }
+  return row;
+}
+
+function searchLibrary(input: Record<string, unknown>) {
   const query = String(input.query ?? "")
     .trim()
     .toLowerCase();
   const bpmMin = input.bpm_min != null ? Number(input.bpm_min) : null;
   const bpmMax = input.bpm_max != null ? Number(input.bpm_max) : null;
   const key = input.key != null ? String(input.key).toUpperCase() : null;
+  const limit = Math.min(100, Math.max(1, Math.floor(Number(input.limit ?? 25) || 25)));
+  const offset = Math.max(0, Math.floor(Number(input.offset ?? 0) || 0));
 
-  return Object.values(getDoc().tracks)
-    .filter((t) => {
-      if (query) {
-        const hay = `${t.title} ${t.artist}`.toLowerCase();
-        if (!hay.includes(query)) return false;
-      }
-      const bpm = t.analysis?.bpm;
-      if (bpmMin != null && (bpm == null || bpm < bpmMin)) return false;
-      if (bpmMax != null && (bpm == null || bpm > bpmMax)) return false;
-      if (key && t.analysis?.key.camelot !== key) return false;
+  const all = Object.values(getDoc().tracks).filter((t) => {
+    if (query) {
+      const hay = `${t.title} ${t.artist}`.toLowerCase();
+      if (!hay.includes(query)) return false;
+    }
+    const bpm = t.analysis?.bpm;
+    if (bpmMin != null && (bpm == null || bpm < bpmMin)) return false;
+    if (bpmMax != null && (bpm == null || bpm > bpmMax)) return false;
+    if (key && t.analysis?.key.camelot !== key) return false;
+    return true;
+  });
+  all.sort((a, b) => a.title.localeCompare(b.title));
+  const tracks = all.slice(offset, offset + limit).map(searchTrackRow);
+  return {
+    tracks,
+    total: all.length,
+    offset,
+    limit,
+    has_more: offset + tracks.length < all.length,
+  };
+}
+
+/**
+ * Per-tool output budgets (chars). null = uncapped. Everything else defaults
+ * to toolResult's 6000 — the days of every WebMCP result sliced at 1500
+ * mid-JSON are over.
+ */
+const OUTPUT_BUDGETS: Record<string, number | null> = {
+  get_dj_playbook: null,
+  get_crate_health: null,
+  prepare_set: null,
+  plan_set_arc: null,
+  preview_join: null,
+  apply_transition_recipe: null,
+  get_mix_points: 8000,
+  get_track: 8000,
+  get_set_timeline: 10000,
+  get_session: 10000,
+  verify_set: 8000,
+  get_set_quality: 8000,
+  suggest_compatible: 8000,
+  search_library: 10000,
+};
+
+/**
+ * Hardware-jockey tools stay out of the agent's face by default — 60+ flat
+ * tools invite a model to push faders instead of composing. Enable with
+ * ?booth=1 (or localStorage bananalabs:booth=1) when you want manual jamming
+ * exposed too. They remain callable from the Agent panel either way.
+ */
+const BOOTH_TOOLS = new Set([
+  "load_deck",
+  "unload_deck",
+  "deck_play",
+  "deck_pause",
+  "deck_seek",
+  "deck_set_tempo",
+  "deck_set_loop",
+  "deck_set_options",
+  "set_tempo_master",
+  "sync_deck",
+  "hotcue",
+  "prep_hotcues",
+  "set_gain",
+  "set_eq",
+  "set_filter",
+  "set_fader",
+  "set_crossfader",
+  "set_xfader_curve",
+  "deck_set_fx_send",
+  "sampler_set_pad",
+  "sampler_trigger",
+  "sampler_set_master",
+  "record_start",
+  "record_stop",
+  "record_clear",
+]);
+
+function boothToolsEnabled(): boolean {
+  try {
+    if (typeof location !== "undefined" && new URLSearchParams(location.search).has("booth")) {
       return true;
-    })
-    .slice(0, 40)
-    .map((t) => ({
-      id: t.id,
-      title: t.title,
-      artist: t.artist,
-      bpm: t.analysis?.bpm ?? null,
-      key: t.analysis?.key.camelot ?? null,
-      energy: t.analysis?.energyMean ?? null,
-      energyLevel: deriveEnergyLevel(t),
-      role: t.craft?.role ?? t.analysis?.suggestedRole ?? null,
-      genre: t.craft?.genreHint ?? t.analysis?.genreHint ?? null,
-      vocalLead: Boolean(t.analysis?.vocalLead),
-      keyConfidence: t.analysis?.key.confidence ?? null,
-      durationBars: t.analysis?.durationBars ?? null,
-      sections: t.analysis?.sections.map((s) => s.label) ?? [],
-      status: t.analysisStatus,
-    }));
+    }
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("bananalabs:booth") === "1";
+    }
+  } catch {
+    /* non-browser context */
+  }
+  return false;
 }
 
 export async function registerToolsWithBrowser(): Promise<boolean> {
@@ -2422,7 +2871,10 @@ export async function registerToolsWithBrowser(): Promise<boolean> {
   for (const [, controller] of registrationControllers) controller.abort();
   registrationControllers.clear();
 
+  const booth = boothToolsEnabled();
+  const registered: string[] = [];
   for (const tool of localTools.values()) {
+    if (BOOTH_TOOLS.has(tool.name) && !booth) continue;
     const controller = new AbortController();
     registrationControllers.set(tool.name, controller);
     await document.modelContext!.registerTool(
@@ -2434,12 +2886,18 @@ export async function registerToolsWithBrowser(): Promise<boolean> {
         annotations: tool.annotations,
         execute: async (input, { signal }) => {
           const result = await tool.execute(input ?? {}, { signal });
-          return typeof result === "string" ? result : toolResult(result);
+          return typeof result === "string"
+            ? result
+            : toolResult(result, OUTPUT_BUDGETS[tool.name]);
         },
       },
       { signal: controller.signal },
     );
+    registered.push(tool.name);
   }
+  console.log(
+    `[webmcp] registered ${registered.length} tools${booth ? " (booth tier on)" : " — booth tools hidden; add ?booth=1 to expose them"}`,
+  );
   return true;
 }
 

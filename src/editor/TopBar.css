@@ -1,6 +1,6 @@
 .topbar {
   display: grid;
-  grid-template-columns: 180px 1fr auto;
+  grid-template-columns: minmax(140px, 180px) 1fr auto;
   align-items: center;
   gap: 12px;
   height: var(--topbar-h);
@@ -14,14 +14,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
-.topbar-logo {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--banana);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--banana) 70%, transparent);
+.topbar-brand .banana-logo {
+  flex: 0 0 auto;
+  display: block;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--banana) 45%, transparent));
 }
 
 .topbar-product {
@@ -29,6 +28,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .topbar-title {

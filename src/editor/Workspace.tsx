@@ -1,18 +1,18 @@
 import "./Workspace.css";
-import { useEffect } from "react";
+import { useEffect, useMemo, type CSSProperties } from "react";
 import { useSetStore } from "../commands/pipeline";
 import type { DeckId, Track } from "../types/setdoc";
 import { audioEngine } from "../audio/engine";
-import { setPerformer } from "../audio/setPerformer";
 import { ProposalBanner } from "./ProposalBanner";
 import { BoothExtras } from "./BoothExtras";
 import { MixerStrip } from "./MixerStrip";
 import { JogWheel } from "./controls/JogWheel";
 import { HardwareButton } from "./controls/HardwareButton";
 import { VerticalFader } from "./controls/VerticalFader";
-import { buildTimeline, setDurationBars } from "../set/timeline";
+import { formatCamelot } from "../set/builder";
 import { fetchLyricsForTrack } from "../lyrics/lrclib";
 import { executeLocalTool } from "../webmcp/registry";
+import { SetRuler } from "./SetRuler";
 
 async function fetchDeckLyrics(trackId: string) {
   const track = useSetStore.getState().doc.tracks[trackId];
@@ -64,6 +64,23 @@ function lyricWindow(track: Track, playheadBars: number): string {
     .join(" ");
 }
 
+function useDeckPlayhead(deck: "A" | "B") {
+  return useSetStore((s) => {
+    const d = s.doc.decks[deck];
+    return s.transport.setPlaying || d.playing
+      ? (s.transport.deckPlayheads[deck] ?? d.positionBars)
+      : d.positionBars;
+  });
+}
+
+function currentPlayhead(deck: "A" | "B"): number {
+  const s = useSetStore.getState();
+  const d = s.doc.decks[deck];
+  return s.transport.setPlaying || d.playing
+    ? (s.transport.deckPlayheads[deck] ?? d.positionBars)
+    : d.positionBars;
+}
+
 function useLooseDeckPlayheads() {
   const setPlaying = useSetStore((s) => s.transport.setPlaying);
   const playingA = useSetStore((s) => s.doc.decks.A.playing);
@@ -107,34 +124,42 @@ function WaveformView({
 }) {
   const w = 400;
   const h = 56;
-  if (!peaks?.length) {
+  // Static layer (peaks/loop/cues) — rebuild only when those inputs change, not every playhead tick.
+  const staticSvg = useMemo(() => {
+    if (!peaks?.length) return null;
+    const step = w / peaks.length;
+    const mid = h / 2;
+    const bars = peaks.map((p, i) => {
+      const bh = Math.max(1, p * (h - 4));
+      return `<rect x="${i * step}" y="${mid - bh / 2}" width="${Math.max(1, step * 0.85)}" height="${bh}" fill="#ffd60a" opacity="0.9"/>`;
+    });
+    let loop = "";
+    if (
+      loopStartFrac != null &&
+      loopEndFrac != null &&
+      loopEndFrac > loopStartFrac
+    ) {
+      loop = `<rect x="${loopStartFrac * w}" y="0" width="${(loopEndFrac - loopStartFrac) * w}" height="${h}" fill="#4fc3f7" opacity="0.2"/>`;
+    }
+    const cues = (hotcueFracs ?? [])
+      .map((f, i) =>
+        f != null && f >= 0 && f <= 1
+          ? `<line x1="${f * w}" y1="0" x2="${f * w}" y2="${h}" stroke="#fff" stroke-width="1.5" opacity="0.7"/><text x="${f * w + 2}" y="10" fill="#fff" font-size="8" font-family="monospace">${i + 1}</text>`
+          : "",
+      )
+      .join("");
+    return `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${loop}${bars.join("")}${cues}</svg>`;
+  }, [peaks, loopStartFrac, loopEndFrac, hotcueFracs]);
+
+  if (!staticSvg) {
     return <div className="cdj-wave empty" aria-hidden />;
   }
-  const step = w / peaks.length;
-  const mid = h / 2;
-  const bars = peaks.map((p, i) => {
-    const bh = Math.max(1, p * (h - 4));
-    return `<rect x="${i * step}" y="${mid - bh / 2}" width="${Math.max(1, step * 0.85)}" height="${bh}" fill="#ffd60a" opacity="0.9"/>`;
-  });
-  let loop = "";
-  if (
-    loopStartFrac != null &&
-    loopEndFrac != null &&
-    loopEndFrac > loopStartFrac
-  ) {
-    loop = `<rect x="${loopStartFrac * w}" y="0" width="${(loopEndFrac - loopStartFrac) * w}" height="${h}" fill="#4fc3f7" opacity="0.2"/>`;
-  }
-  const cues = (hotcueFracs ?? [])
-    .map((f, i) =>
-      f != null && f >= 0 && f <= 1
-        ? `<line x1="${f * w}" y1="0" x2="${f * w}" y2="${h}" stroke="#fff" stroke-width="1.5" opacity="0.7"/><text x="${f * w + 2}" y="10" fill="#fff" font-size="8" font-family="monospace">${i + 1}</text>`
-        : "",
-    )
-    .join("");
-  const ph =
+
+  const phPct =
     playheadFrac != null && playheadFrac >= 0 && playheadFrac <= 1
-      ? `<line x1="${playheadFrac * w}" y1="0" x2="${playheadFrac * w}" y2="${h}" stroke="#fff" stroke-width="2"/>`
-      : "";
+      ? playheadFrac * 100
+      : null;
+
   return (
     <div
       className="cdj-wave"
@@ -150,9 +175,113 @@ function WaveformView({
             }
           : undefined
       }
-      dangerouslySetInnerHTML={{
-        __html: `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${loop}${bars.join("")}${cues}${ph}</svg>`,
-      }}
+    >
+      <div
+        className="cdj-wave-static"
+        dangerouslySetInnerHTML={{ __html: staticSvg }}
+      />
+      {phPct != null && (
+        <div
+          className="cdj-wave-playhead"
+          style={{ left: `${phPct}%` } as CSSProperties}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeckBars({ deck }: { deck: "A" | "B" }) {
+  const bars = useDeckPlayhead(deck);
+  return <span className="cdj-bars">{bars.toFixed(1)}b</span>;
+}
+
+function DeckWaveform({
+  deck,
+  peaks,
+  durationBars,
+  loopStartFrac,
+  loopEndFrac,
+  hotcueFracs,
+  canSeek,
+}: {
+  deck: "A" | "B";
+  peaks?: number[];
+  durationBars: number;
+  loopStartFrac: number | null;
+  loopEndFrac: number | null;
+  hotcueFracs: (number | null)[];
+  canSeek: boolean;
+}) {
+  const playheadBars = useDeckPlayhead(deck);
+  const playheadFrac = durationBars > 0 ? playheadBars / durationBars : 0;
+  return (
+    <WaveformView
+      peaks={peaks}
+      playheadFrac={playheadFrac}
+      loopStartFrac={loopStartFrac}
+      loopEndFrac={loopEndFrac}
+      hotcueFracs={hotcueFracs}
+      onSeekFrac={
+        canSeek
+          ? (frac) => {
+              const bars = frac * durationBars;
+              useSetStore.getState().dispatch({
+                type: "deck.seek",
+                deck,
+                positionBars: bars,
+              });
+              useSetStore.getState().setTransport({
+                deckPlayheads: {
+                  ...useSetStore.getState().transport.deckPlayheads,
+                  [deck]: bars,
+                },
+              });
+            }
+          : undefined
+      }
+    />
+  );
+}
+
+function DeckLyricsLine({ deck, track }: { deck: "A" | "B"; track: Track }) {
+  const playheadBars = useDeckPlayhead(deck);
+  const slot = Math.floor(playheadBars * 4);
+  const text = useMemo(
+    () => lyricWindow(track, slot / 4),
+    [track, slot],
+  );
+  return (
+    <div className="cdj-lyrics">
+      <HardwareButton onClick={() => void fetchDeckLyrics(track.id)}>
+        Lrc
+      </HardwareButton>
+      <span className="mono">{text}</span>
+    </div>
+  );
+}
+
+function DeckJog({
+  deck,
+  bpm,
+  playing,
+  empty,
+  title,
+}: {
+  deck: "A" | "B";
+  bpm: number | null;
+  playing: boolean;
+  empty: boolean;
+  title?: string;
+}) {
+  const playheadBars = useDeckPlayhead(deck);
+  return (
+    <JogWheel
+      deck={deck}
+      bpm={bpm}
+      playing={playing}
+      playheadBars={playheadBars}
+      empty={empty}
+      title={title}
     />
   );
 }
@@ -165,16 +294,10 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
   );
   const dispatch = useSetStore((s) => s.dispatch);
   const setPlaying = useSetStore((s) => s.transport.setPlaying);
-  const playheadBars = useSetStore((s) =>
-    s.transport.setPlaying || state.playing
-      ? (s.transport.deckPlayheads[deck] ?? state.positionBars)
-      : state.positionBars,
-  );
   const tempoMaster = useSetStore((s) => s.doc.tempoMaster);
 
   const peaks = track?.analysis?.waveform.peaks;
   const durationBars = track?.analysis?.durationBars ?? 1;
-  const playheadFrac = durationBars > 0 ? playheadBars / durationBars : 0;
   const loopStartFrac =
     state.loopInBars != null && durationBars > 0
       ? state.loopInBars / durationBars
@@ -186,20 +309,8 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
   const hotcueFracs = state.hotcues.map((hc) =>
     hc != null && durationBars > 0 ? hc / durationBars : null,
   );
-  const spinning = state.playing || (setPlaying && Boolean(trackId));
   const nativeBpm = track?.analysis?.bpm ?? state.bpm ?? 120;
   const deckBpm = state.bpm ?? nativeBpm;
-
-  const seekBars = (bars: number) => {
-    if (setPlaying) return;
-    dispatch({ type: "deck.seek", deck, positionBars: bars });
-    useSetStore.getState().setTransport({
-      deckPlayheads: {
-        ...useSetStore.getState().transport.deckPlayheads,
-        [deck]: bars,
-      },
-    });
-  };
 
   return (
     <section className={`cdj-deck deck-${deck.toLowerCase()}`}>
@@ -209,7 +320,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
           <strong>{track?.title ?? "No track loaded"}</strong>
           <span className="cdj-meta">
             {track
-              ? `${track.artist || "Unknown"}${track.analysis ? ` · ${track.analysis.key.camelot}` : ""}`
+              ? `${track.artist || "Unknown"}${track.analysis ? ` · ${formatCamelot(track.analysis.key)}` : ""}`
               : "Load from Assets"}
           </span>
         </div>
@@ -217,7 +328,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
           <span className="cdj-bpm-big">
             {state.bpm != null ? state.bpm.toFixed(1) : "—.—"}
           </span>
-          <span className="cdj-bars">{playheadBars.toFixed(1)}b</span>
+          <DeckBars deck={deck} />
           <span className="cdj-leds">
             <i className={state.keylock ? "on" : ""}>KL</i>
             <i className={state.quantize ? "on" : ""}>Q</i>
@@ -226,36 +337,25 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
         </div>
       </header>
 
-      <WaveformView
+      <DeckWaveform
+        deck={deck}
         peaks={peaks}
-        playheadFrac={playheadFrac}
+        durationBars={durationBars}
         loopStartFrac={loopStartFrac}
         loopEndFrac={loopEndFrac}
         hotcueFracs={hotcueFracs}
-        onSeekFrac={
-          track && !setPlaying
-            ? (frac) => seekBars(frac * durationBars)
-            : undefined
-        }
+        canSeek={Boolean(track) && !setPlaying}
       />
 
-      {track && (
-        <div className="cdj-lyrics">
-          <HardwareButton onClick={() => void fetchDeckLyrics(track.id)}>
-            Lrc
-          </HardwareButton>
-          <span className="mono">{lyricWindow(track, playheadBars)}</span>
-        </div>
-      )}
+      {track && <DeckLyricsLine deck={deck} track={track} />}
 
       <div className="cdj-platter-row">
-        <JogWheel
+        <DeckJog
           deck={deck}
           bpm={state.bpm}
-          playing={spinning}
-          playheadBars={playheadBars}
+          playing={state.playing}
           empty={!track}
-          title={track?.analysis?.key.camelot}
+          title={track?.analysis ? formatCamelot(track.analysis.key) : undefined}
         />
         <VerticalFader
           label="Tempo"
@@ -349,7 +449,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
                 type: "deck.setLoop",
                 deck,
                 bars: state.loopBars === bars ? null : bars,
-                inBars: playheadBars,
+                inBars: currentPlayhead(deck),
               })
             }
           >
@@ -371,7 +471,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
                   type: "deck.setHotcue",
                   deck,
                   pad: i + 1,
-                  bars: playheadBars,
+                  bars: currentPlayhead(deck),
                 });
               }
             }}
@@ -390,18 +490,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
 
 export function Workspace() {
   useLooseDeckPlayheads();
-  const arrangement = useSetStore((s) => s.doc.arrangement);
-  const tracks = useSetStore((s) => s.doc.tracks);
   const proposal = useSetStore((s) => s.doc.proposal);
-  const doc = useSetStore((s) => s.doc);
-  const trackCount = useSetStore((s) => s.doc.crates.all?.trackIds.length ?? 0);
-  const setPos = useSetStore((s) => s.transport.setPositionBars);
-  const setPlaying = useSetStore((s) => s.transport.setPlaying);
-  const entryIndex = useSetStore((s) => s.transport.entryIndex);
-
-  const spans = buildTimeline(doc);
-  const duration = setDurationBars(doc);
-  const playheadPct = duration > 0 ? (setPos / duration) * 100 : 0;
 
   return (
     <div className="workspace-inner booth">
@@ -415,60 +504,7 @@ export function Workspace() {
       </div>
 
       <BoothExtras />
-
-      <section className="set-ruler">
-        <header>
-          <h3>Set</h3>
-          <span className="mono">
-            {arrangement.length}tr
-            {duration > 0 ? ` · ${duration.toFixed(0)}b` : ""}
-            {setPlaying || setPos > 0 ? ` · @${setPos.toFixed(1)}` : ""}
-          </span>
-        </header>
-        {arrangement.length === 0 ? (
-          <div className="set-ruler-empty">
-            {trackCount === 0
-              ? "Assets → upload tracks"
-              : "No arrangement — open Set or use agent tools"}
-          </div>
-        ) : (
-          <div
-            className="set-ruler-track"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const frac = (e.clientX - rect.left) / rect.width;
-              void setPerformer.seek(frac * duration);
-            }}
-          >
-            {spans.map((span) => {
-              const t = tracks[span.entry.trackId];
-              const widthPct =
-                duration > 0
-                  ? ((span.setEnd - span.setStart) / duration) * 100
-                  : 0;
-              const leftPct =
-                duration > 0 ? (span.setStart / duration) * 100 : 0;
-              return (
-                <div
-                  key={span.entry.id}
-                  className={`set-block${span.entryIndex === entryIndex ? " is-active" : ""}`}
-                  style={{
-                    width: `${Math.max(4, widthPct)}%`,
-                    left: `${leftPct}%`,
-                  }}
-                  title={`${t?.title ?? "Track"} · ${span.entry.transition.type}`}
-                >
-                  {span.entryIndex + 1}. {t?.title ?? "Track"}
-                </div>
-              );
-            })}
-            <div
-              className="set-playhead"
-              style={{ left: `${playheadPct}%` }}
-            />
-          </div>
-        )}
-      </section>
+      <SetRuler />
     </div>
   );
 }

@@ -46,6 +46,7 @@ export const TOOL_UI_MAP: Record<string, ToolUiSurface> = {
   set_eq: "mixer",
   set_filter: "mixer",
   set_fader: "mixer",
+  set_cue: "mixer",
   set_crossfader: "mixer",
   set_xfader_curve: "mixer",
   set_insert_track: "set",
@@ -74,6 +75,7 @@ export const TOOL_UI_MAP: Record<string, ToolUiSurface> = {
   record_start: "record",
   record_stop: "record",
   record_clear: "record",
+  download_set: "transport",
 };
 
 export function assertToolMapped(name: string) {

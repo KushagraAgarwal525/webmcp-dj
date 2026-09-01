@@ -23,7 +23,28 @@ export type TransitionType =
   | "double_drop"
   | "loop_roll"
   | "backspin"
-  | "hook_layer";
+  | "hook_layer"
+  | "air_cut"
+  | "tempo_ride"
+  | "tease_slam";
+
+export const TRANSITION_TYPES: TransitionType[] = [
+  "cut",
+  "blend",
+  "eq_swap",
+  "filter_sweep",
+  "echo_out",
+  "loop_out",
+  "build_cut",
+  "drop_swap",
+  "double_drop",
+  "loop_roll",
+  "backspin",
+  "hook_layer",
+  "air_cut",
+  "tempo_ride",
+  "tease_slam",
+];
 
 export type TrackRole = "opener" | "builder" | "bridge" | "peak" | "reset" | "closer";
 export type TrackMood = "dark" | "bright" | "driving" | "warm";
@@ -33,7 +54,11 @@ export type TrackCraft = {
   energyLevel?: number;
   mood?: TrackMood;
   genreHint?: string;
+  /** Who wrote genreHint — never DSP. */
+  genreSource?: "musicbrainz" | "human" | "agent";
 };
+
+export type ComposeStyle = "chop" | "blend";
 
 export type AutomationCurve = "linear" | "exponential" | "ease_in" | "ease_out";
 
@@ -77,18 +102,47 @@ export type TrackAnalysis = {
   bpm: number;
   durationSec: number;
   durationBars: number;
-  key: { camelot: string; confidence: number; name?: string };
+  key: {
+    camelot: string;
+    confidence: number;
+    name?: string;
+    window?: "intro" | "drop";
+    /** Template set used — edma = Faraldo EDM profiles, not Krumhansl. */
+    profile?: "edma" | "krumhansl";
+  };
   beats: number[];
   downbeats: number[];
   sections: AnalysisSection[];
   energy: number[];
   energyMean: number;
   energyLevel?: number;
+  /** High-band / total ratio 0..1 — display this, never the word "dark". */
+  brightness?: number;
+  /**
+   * Measured spectral timbre. Do not show this as mood. Emotional mood is
+   * craft-only (human / MusicBrainz / agent).
+   */
+  timbre?: "bright" | "dark" | "warm";
+  /** @deprecated legacy rows only — the detector stopped emitting genre guesses. */
   genreHint?: string;
+  /** @deprecated legacy rows only — the detector stopped emitting mood guesses. */
   mood?: TrackMood;
   vocalLead?: boolean;
+  /** @deprecated DSP no longer assigns set roles — slots are assigned at compose time. */
   suggestedRole?: TrackRole;
   vocalRegions?: { startSec: number; endSec: number; startBars: number; endBars: number }[];
+  /**
+   * Per-bucket chroma (96 windows × 12 pitch classes, normalized per bucket) —
+   * the audio truth behind harmony auditions. Absent on pre-chroma analyses.
+   */
+  chromaCurve?: number[][];
+  /** Phrase-snapped peak drop (Foote novelty ∩ salience). */
+  dropBars?: number;
+  /** Hottest 16-bar window (energy-curve argmax, phrase-snapped). */
+  heatInBars?: number;
+  heatOutBars?: number;
+  /** Detector generation — stale rows without this get re-analyzed. */
+  detector?: "salience-v1";
   lyrics?: { words: { t: number; w: string }[]; explicit: boolean };
   waveform: WaveformPeaks;
   analyzedAt: number;

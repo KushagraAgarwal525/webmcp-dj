@@ -4,8 +4,8 @@ import { useSetStore } from "../commands/pipeline";
 import { importAudioFiles } from "../library/importTracks";
 import type { Track, TrackMood, TrackRole } from "../types/setdoc";
 import { analysisNeedsRefresh } from "../analysis/stale";
-import { deriveEnergyLevel } from "../set/builder";
-import { findDropBars, findHoleBars } from "../set/craft";
+import { deriveEnergyLevel, formatCamelot, KEY_CONFIDENCE_OK } from "../set/builder";
+import { findDropBars, findHoleBars, findPeakDropBars } from "../set/craft";
 import { executeLocalTool } from "../webmcp/registry";
 import { PanelHeader } from "./PanelHeader";
 
@@ -32,11 +32,11 @@ function TrackRow({ track }: { track: Track }) {
   const dispatch = useSetStore((s) => s.dispatch);
   const setActivity = useSetStore((s) => s.setActivity);
   const a = track.analysis;
-  const role = track.craft?.role ?? a?.suggestedRole ?? "";
+  const role = track.craft?.role ?? "";
   const energy = deriveEnergyLevel(track);
-  const genre = track.craft?.genreHint ?? a?.genreHint;
-  const mood = track.craft?.mood ?? a?.mood;
-  const drop = findDropBars(track);
+  const genre = track.craft?.genreHint;
+  const mood = track.craft?.mood;
+  const drop = findPeakDropBars(track) ?? findDropBars(track);
   const hole = findHoleBars(track);
 
   return (
@@ -54,13 +54,18 @@ function TrackRow({ track }: { track: Track }) {
         {a && (
           <>
             <span>{a.bpm.toFixed(1)} BPM</span>
-            <span title={`confidence ${a.key.confidence}`}>
-              {a.key.camelot}
+            <span title={`confidence ${a.key.confidence}${a.key.confidence < KEY_CONFIDENCE_OK ? " — key unknown, no long pad" : ""}`}>
+              {formatCamelot(a.key)}
               {a.key.name ? ` ${a.key.name}` : ""}
             </span>
             {energy != null && <span className="pill">E{energy}</span>}
             {genre && genre !== "unknown" && <span>{genre}</span>}
             {mood && <span>{mood}</span>}
+            {a.brightness != null && (
+              <span className="pill" title="high-band ratio — not mood">
+                br {a.brightness.toFixed(2)}
+              </span>
+            )}
             {a.vocalLead && <span className="pill">vocal</span>}
             {drop != null && <span className="pill">drop {drop}</span>}
             {hole != null && <span className="pill">hole {hole}</span>}
@@ -85,7 +90,7 @@ function TrackRow({ track }: { track: Track }) {
                 });
               }}
             >
-              <option value="">auto</option>
+              <option value="">—</option>
               {ROLES.map((r) => (
                 <option key={r} value={r}>
                   {r}
@@ -127,7 +132,7 @@ function TrackRow({ track }: { track: Track }) {
                 });
               }}
             >
-              <option value="">auto</option>
+              <option value="">—</option>
               {MOODS.map((m) => (
                 <option key={m} value={m}>
                   {m}

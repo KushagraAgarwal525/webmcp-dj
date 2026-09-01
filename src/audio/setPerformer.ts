@@ -3,12 +3,19 @@ import { useSetStore } from "../commands/pipeline";
 import type { AutomationParam, ChannelState, DeckId, SetDoc } from "../types/setdoc";
 import {
   allAutomation,
+  backspinPlayheadBars,
+  backspinSpinWindow,
   buildTimeline,
-  masterBpm,
+  entryBpm,
+  joinIsClockIndependent,
+  livePlayheadBars,
   sampleAutomation,
+  sampleAutomationHeld,
   setDurationBars,
+  spanPlayheadBars,
   type TimelineSpan,
 } from "../set/timeline";
+import { getAudioBuffer, peekAudioBuffer } from "./bufferCache";
 
 type ActiveSlot = {
   entryIndex: number;
@@ -17,10 +24,19 @@ type ActiveSlot = {
 
 class SetPerformer {
   private raf = 0;
-  private lastMs = 0;
+  private lastCtxTime = 0;
   private positionBars = 0;
   private active: Partial<Record<"A" | "B", ActiveSlot>> = {};
   private starting = false;
+  /** One sync at a time; ticks set dirty instead of cancelling in-flight work. */
+  private syncInFlight = false;
+  private syncNeeded = false;
+  private lastDriftSeekMs: Partial<Record<"A" | "B", number>> = {};
+  private lastUiTransportMs = 0;
+  private lastAutoKey = "";
+  private suppressDriftUntil = 0;
+  private hiddenTimer: ReturnType<typeof setInterval> | undefined;
+  private visibilityWatch = false;
 
   isPlaying() {
     return useSetStore.getState().transport.setPlaying;
@@ -80,6 +96,13 @@ class SetPerformer {
       this.positionBars = start;
       this.active = {};
 
+      const dispatch = useSetStore.getState().dispatch;
+      for (const deck of ["A", "B"] as const) {
+        if (useSetStore.getState().doc.decks[deck].playing) {
+          dispatch({ type: "deck.pause", deck }, "system");
+        }
+      }
+
       useSetStore.getState().patchLive((d) => resetMixerForSet(d));
 
       useSetStore.getState().setTransport({
@@ -90,13 +113,18 @@ class SetPerformer {
       useSetStore.getState().setActivity("Playing set");
 
       // Tempo + mixer first, then load/seek/play so decks never start at native BPM.
+      this.lastAutoKey = "";
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
-      await this.syncDecks(useSetStore.getState().doc, this.positionBars, true);
+      await this.runSyncDecks(true);
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
 
-      this.lastMs = performance.now();
+      this.attachVisibility();
+      this.lastCtxTime = audioEngine.getCurrentTime();
+      this.lastUiTransportMs = 0;
+      this.suppressDriftUntil = 0;
+      this.clearHiddenTimer();
       cancelAnimationFrame(this.raf);
-      this.raf = requestAnimationFrame((t) => this.tick(t));
+      this.raf = requestAnimationFrame(() => this.tick());
     } finally {
       this.starting = false;
     }
@@ -105,6 +133,8 @@ class SetPerformer {
   pause() {
     cancelAnimationFrame(this.raf);
     this.raf = 0;
+    this.clearHiddenTimer();
+    this.syncNeeded = false;
     audioEngine.setPerformerSync(false);
     useSetStore.getState().setTransport({ setPlaying: false });
     for (const deck of ["A", "B"] as const) {
@@ -121,14 +151,85 @@ class SetPerformer {
     const dur = setDurationBars(doc);
     this.positionBars = Math.max(0, Math.min(setBars, Math.max(0, dur)));
     this.active = {};
+    this.lastAutoKey = "";
+    this.lastDriftSeekMs = {};
     useSetStore.getState().setTransport({ setPositionBars: this.positionBars });
     this.applyAutomation(useSetStore.getState().doc, this.positionBars);
-    await this.syncDecks(
-      useSetStore.getState().doc,
-      this.positionBars,
-      this.isPlaying(),
-    );
+    this.lastCtxTime = audioEngine.getCurrentTime();
+    this.suppressDriftUntil = performance.now() + 250;
+    // Wait for any in-flight tick sync, then force a complete sync that isn't cancelled.
+    await this.waitForSyncIdle();
+    await this.runSyncDecks(this.isPlaying());
     this.applyAutomation(useSetStore.getState().doc, this.positionBars);
+    this.lastCtxTime = audioEngine.getCurrentTime();
+    // Keep UI playheads in sync immediately after ruler seek.
+    this.updatePlayheads(useSetStore.getState().doc);
+  }
+
+  private attachVisibility() {
+    if (this.visibilityWatch || typeof document === "undefined") return;
+    this.visibilityWatch = true;
+    document.addEventListener("visibilitychange", this.onVisibility);
+  }
+
+  private onVisibility = () => {
+    if (document.visibilityState === "hidden") this.onPageHidden();
+    else void this.onPageVisible();
+  };
+
+  private clearHiddenTimer() {
+    if (!this.hiddenTimer) return;
+    clearInterval(this.hiddenTimer);
+    this.hiddenTimer = undefined;
+  }
+
+  private onPageHidden() {
+    if (!this.isPlaying() || this.hiddenTimer) return;
+    this.hiddenTimer = setInterval(() => this.hiddenTick(), 250);
+  }
+
+  private async onPageVisible() {
+    this.clearHiddenTimer();
+    await audioEngine.unlock();
+    if (!this.isPlaying()) return;
+    this.suppressDriftUntil = performance.now() + 500;
+    if (!this.raf) {
+      this.raf = requestAnimationFrame(() => this.tick());
+    }
+  }
+
+  /** Advance set clock from AudioContext time — survives rAF pauses while audio runs. */
+  private advanceClock() {
+    const ctxNow = audioEngine.getCurrentTime();
+    if (this.lastCtxTime <= 0) {
+      this.lastCtxTime = ctxNow;
+      return;
+    }
+    let dt = ctxNow - this.lastCtxTime;
+    // Context was recreated / currentTime reset — don't yank the playhead.
+    if (!Number.isFinite(dt) || dt < 0 || (this.lastCtxTime > 1 && ctxNow < 0.5)) {
+      this.lastCtxTime = ctxNow;
+      return;
+    }
+    this.lastCtxTime = ctxNow;
+    const doc = useSetStore.getState().doc;
+    this.positionBars += dt * (this.clockBpm(doc, this.positionBars) / 240);
+  }
+
+  private hiddenTick() {
+    if (!this.isPlaying()) return;
+    this.advanceClock();
+    const doc = useSetStore.getState().doc;
+    const dur = setDurationBars(doc);
+    if (dur > 0 && this.positionBars >= dur) {
+      this.positionBars = 0;
+      useSetStore.getState().setTransport({ setPositionBars: 0 });
+      this.pause();
+      useSetStore.getState().setActivity("Set finished");
+      return;
+    }
+    this.applyAutomation(doc, this.positionBars);
+    this.applyBackspin(doc, this.positionBars);
   }
 
   private async playLooseDecks() {
@@ -141,19 +242,13 @@ class SetPerformer {
     }
   }
 
-  private tick(now: number) {
+  private tick() {
     if (!useSetStore.getState().transport.setPlaying) return;
 
-    const dt = Math.min(0.1, (now - this.lastMs) / 1000);
-    this.lastMs = now;
+    this.advanceClock();
 
     const doc = useSetStore.getState().doc;
     const dur = setDurationBars(doc);
-    let bpm = masterBpm(doc);
-    const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", this.positionBars);
-    if (tempoAuto != null && tempoAuto > 0) bpm = tempoAuto;
-
-    this.positionBars += dt * (bpm / 240);
 
     if (dur > 0 && this.positionBars >= dur) {
       this.positionBars = 0;
@@ -165,9 +260,11 @@ class SetPerformer {
 
     this.applyAutomation(doc, this.positionBars);
     this.applyLoopOut(doc, this.positionBars);
-    void this.syncDecks(doc, this.positionBars, true);
+    if (typeof document === "undefined" || document.visibilityState === "visible") {
+      void this.queueSyncDecks(doc, this.positionBars, true);
+    }
     this.applyBackspin(doc, this.positionBars);
-    this.updatePlayheads(doc);
+    this.prefetchUpcoming(doc, this.positionBars);
 
     const spans = buildTimeline(doc);
     let entryIndex = 0;
@@ -175,17 +272,25 @@ class SetPerformer {
       if (this.positionBars >= s.setStart) entryIndex = s.entryIndex;
     }
 
-    useSetStore.getState().setTransport({
-      setPositionBars: this.positionBars,
-      entryIndex,
-    });
+    // UI transport at ~20 Hz — audio clock stays full-rate above.
+    const nowUi = performance.now();
+    if (nowUi - this.lastUiTransportMs >= 50) {
+      this.lastUiTransportMs = nowUi;
+      this.updatePlayheads(doc, spans, {
+        setPositionBars: this.positionBars,
+        entryIndex,
+      });
+    }
 
-    this.raf = requestAnimationFrame((t) => this.tick(t));
+    this.raf = requestAnimationFrame(() => this.tick());
   }
 
-  private updatePlayheads(doc: SetDoc) {
+  private updatePlayheads(
+    doc: SetDoc,
+    spans = buildTimeline(doc),
+    extra?: { setPositionBars?: number; entryIndex?: number },
+  ) {
     const heads: Partial<Record<DeckId, number>> = {};
-    const spans = buildTimeline(doc);
     const setBars = this.positionBars;
 
     for (const deck of ["A", "B"] as DeckId[]) {
@@ -194,7 +299,7 @@ class SetPerformer {
         (s) => s.deck === deck && setBars >= s.setStart && setBars < s.setEnd,
       );
       if (span) {
-        const trackBars = span.entry.inBars + (setBars - span.setStart);
+        const trackBars = livePlayheadBars(spans, span, setBars);
         const dur = doc.tracks[span.entry.trackId]?.analysis?.durationBars;
         heads[deck] =
           dur != null ? Math.min(trackBars, Math.max(0, dur - 0.01)) : trackBars;
@@ -202,7 +307,10 @@ class SetPerformer {
         heads[deck] = audioEngine.getPositionBars(deck);
       }
     }
-    useSetStore.getState().setTransport({ deckPlayheads: heads as Record<DeckId, number> });
+    useSetStore.getState().setTransport({
+      deckPlayheads: heads as Record<DeckId, number>,
+      ...extra,
+    });
   }
 
   private applyAutomation(doc: SetDoc, setBars: number) {
@@ -227,11 +335,20 @@ class SetPerformer {
       "fx_arm",
     ];
     for (const p of params) {
-      const v = sampleAutomation(lanes, p, setBars);
+      // Held values so seek/jump into later spans keeps xfader/EQ from prior transitions.
+      const v = sampleAutomationHeld(lanes, p, setBars);
       if (v != null) patch[p] = v;
     }
 
     if (!Object.keys(patch).length) return;
+
+    // Skip identical automation frames (same DSP targets → no doc churn / engine sync).
+    const key = Object.keys(patch)
+      .sort()
+      .map((k) => `${k}:${Math.round((patch[k as AutomationParam] as number) * 1000)}`)
+      .join("|");
+    if (key === this.lastAutoKey) return;
+    this.lastAutoKey = key;
 
     useSetStore.getState().patchLive((d) => {
       let next = d;
@@ -271,45 +388,118 @@ class SetPerformer {
           fx: {
             ...next.fx,
             wet,
-            type: arm > 0.5 ? "delay" : next.fx.type === "delay" ? "off" : next.fx.type,
+            type:
+              arm > 0.5 || wet > 0.03
+                ? "delay"
+                : next.fx.type === "delay"
+                  ? "off"
+                  : next.fx.type,
             timeBeats: arm > 0.5 ? Math.max(next.fx.timeBeats, 0.75) : next.fx.timeBeats,
             feedback: arm > 0.5 ? Math.max(next.fx.feedback, 0.4) : next.fx.feedback,
           },
         };
-        // Route send from both decks when armed so echo_out is audible
+        const decks = { ...next.decks };
+        const xf = mixer.crossfader;
+        // Only the leave deck feeds the send — never both, never the incoming record.
         if (arm > 0.5) {
-          const decks = { ...next.decks };
-          for (const deck of ["A", "B"] as DeckId[]) {
-            if (decks[deck].trackId && (decks[deck].fxSend ?? 0) < 0.35) {
-              decks[deck] = { ...decks[deck], fxSend: 0.55 };
-            }
-          }
-          next = { ...next, decks };
+          const aFader = mixer.channels.A.fader;
+          const bFader = mixer.channels.B.fader;
+          decks.A = {
+            ...decks.A,
+            fxSend: xf <= 0 && aFader > 0.02 ? 0.55 : 0,
+          };
+          decks.B = {
+            ...decks.B,
+            fxSend: xf >= 0 && bFader > 0.02 ? 0.55 : 0,
+          };
+        } else {
+          decks.A = { ...decks.A, fxSend: 0 };
+          decks.B = { ...decks.B, fxSend: 0 };
         }
+        next = { ...next, decks };
       }
 
-      let tempo = next.setTempoBpm;
-      if (patch.tempo != null && patch.tempo > 0) tempo = patch.tempo;
-
-      const bpm = tempo ?? masterBpm(next);
-      const decks = { ...next.decks };
-      for (const deck of ["A", "B"] as DeckId[]) {
-        if (decks[deck].trackId && decks[deck].bpm !== bpm) {
-          decks[deck] = { ...decks[deck], bpm };
-          next = { ...next, decks };
-        }
-      }
-      if (tempo !== next.setTempoBpm) {
-        next = { ...next, setTempoBpm: tempo };
-      }
       return next;
     });
   }
 
-  private targetBpm(doc: SetDoc, setBars: number): number {
+  private clockBpm(doc: SetDoc, setBars: number): number {
     const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", setBars);
     if (tempoAuto != null && tempoAuto > 0) return tempoAuto;
-    return doc.setTempoBpm ?? masterBpm(doc);
+    const spans = buildTimeline(doc);
+    const live = [...spans]
+      .reverse()
+      .find((s) => setBars >= s.setStart && setBars < s.setEnd);
+    if (live) return entryBpm(doc, live.entry);
+    const ended = [...spans].reverse().find((s) => s.setEnd <= setBars);
+    if (ended) return entryBpm(doc, ended.entry);
+    return spans[0] ? entryBpm(doc, spans[0].entry) : 120;
+  }
+
+  private deckTargetBpm(doc: SetDoc, setBars: number, span: TimelineSpan): number {
+    const live = buildTimeline(doc).filter(
+      (s) => setBars >= s.setStart && setBars < s.setEnd,
+    );
+    const overlapping = live.length > 1;
+    const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", setBars);
+    if (overlapping) {
+      const incoming = live.reduce((a, b) => (a.setStart >= b.setStart ? a : b));
+      if (joinIsClockIndependent(incoming.entry.transition.type)) {
+        return entryBpm(doc, span.entry);
+      }
+      if (tempoAuto != null && tempoAuto > 0) return tempoAuto;
+      if (doc.setTempoBpm != null && doc.setTempoBpm > 0) return doc.setTempoBpm;
+      const outgoing = live.reduce((a, b) => (a.setStart <= b.setStart ? a : b));
+      return entryBpm(doc, outgoing.entry);
+    }
+    return entryBpm(doc, span.entry);
+  }
+
+  /** Tick path: never cancel an in-flight sync — just mark dirty. */
+  private queueSyncDecks(_doc: SetDoc, _setBars: number, shouldPlay: boolean) {
+    if (this.syncInFlight) {
+      this.syncNeeded = true;
+      return;
+    }
+    void this.runSyncDecks(shouldPlay);
+  }
+
+  private async waitForSyncIdle() {
+    const start = performance.now();
+    while (this.syncInFlight && performance.now() - start < 8000) {
+      await new Promise((r) => setTimeout(r, 16));
+    }
+  }
+
+  /** Complete at most two syncs; leftover dirty is picked up on the next tick. */
+  private async runSyncDecks(shouldPlay: boolean) {
+    if (this.syncInFlight) {
+      this.syncNeeded = true;
+      await this.waitForSyncIdle();
+      if (this.syncInFlight) return;
+    }
+    this.syncInFlight = true;
+    try {
+      this.syncNeeded = false;
+      await this.syncDecks(useSetStore.getState().doc, this.positionBars, shouldPlay);
+      // One catch-up if ticks marked dirty during the first (usually a load).
+      if (this.syncNeeded) {
+        this.syncNeeded = false;
+        await this.syncDecks(useSetStore.getState().doc, this.positionBars, shouldPlay);
+      }
+    } finally {
+      this.syncInFlight = false;
+    }
+  }
+
+  private prefetchUpcoming(doc: SetDoc, setBars: number) {
+    const spans = buildTimeline(doc);
+    const upcoming = spans.find((s) => s.setStart > setBars && s.setStart <= setBars + 16);
+    if (!upcoming) return;
+    const track = doc.tracks[upcoming.entry.trackId];
+    if (!track || peekAudioBuffer(track.fileRef)) return;
+    // Prefetch into shared cache without blocking the audio clock.
+    void audioEngine.ensure().then((c) => getAudioBuffer(c, track.fileRef));
   }
 
   private async syncDecks(doc: SetDoc, setBars: number, shouldPlay: boolean) {
@@ -326,27 +516,25 @@ class SetPerformer {
     }
 
     const store = useSetStore.getState();
-    const bpm = this.targetBpm(store.doc, setBars);
 
     for (const deck of ["A", "B"] as const) {
       const span = wanted.get(deck);
       if (!span) {
-        if (this.active[deck]) {
-          if (store.doc.decks[deck].playing) {
-            store.dispatch({ type: "deck.pause", deck }, "system");
-          }
-          delete this.active[deck];
+        if (store.doc.decks[deck].playing) {
+          store.dispatch({ type: "deck.pause", deck }, "system");
         }
+        delete this.active[deck];
         continue;
       }
 
-      const trackBars = span.entry.inBars + (setBars - span.setStart);
+      const trackBars = spanPlayheadBars(spans, span, setBars);
       const prev = this.active[deck];
       const needLoad =
         !prev ||
         prev.trackId !== span.entry.trackId ||
         prev.entryIndex !== span.entryIndex ||
         store.doc.decks[deck].trackId !== span.entry.trackId;
+      const bpm = this.deckTargetBpm(store.doc, setBars, span);
 
       const seekExact = (bars: number) => {
         store.dispatch(
@@ -355,9 +543,11 @@ class SetPerformer {
         );
       };
       const matchTempo = () => {
-        const live = store.doc.decks[deck];
-        if (live.trackId && live.bpm !== bpm) {
-          store.dispatch({ type: "deck.setTempo", deck, bpm }, "system");
+        const live = useSetStore.getState().doc.decks[deck];
+        // Round: a tempo lane yields a fresh float every tick — dispatching
+        // each one is a store/engine sync storm across the whole ramp.
+        if (live.trackId && (live.bpm == null || Math.abs(live.bpm - bpm) > 0.05)) {
+          useSetStore.getState().dispatch({ type: "deck.setTempo", deck, bpm }, "system");
         }
       };
 
@@ -380,26 +570,48 @@ class SetPerformer {
           trackId: span.entry.trackId,
         };
         if (shouldPlay) {
-          store.dispatch({ type: "deck.play", deck }, "system");
+          useSetStore.getState().dispatch({ type: "deck.play", deck }, "system");
           if (!audioEngine.isBufferReady(deck)) {
             await waitForBuffer(deck, 4000);
             matchTempo();
             seekExact(trackBars);
-            store.dispatch({ type: "deck.play", deck }, "system");
+            useSetStore.getState().dispatch({ type: "deck.play", deck }, "system");
           }
         }
       } else if (shouldPlay) {
         matchTempo();
         const engineBars = audioEngine.getPositionBars(deck);
-        if (!store.doc.decks[deck].playing) {
+        const livePlaying = useSetStore.getState().doc.decks[deck].playing;
+        if (!livePlaying) {
           seekExact(trackBars);
-          store.dispatch({ type: "deck.play", deck }, "system");
-        } else if (Math.abs(engineBars - trackBars) > 0.05) {
-          // Keep decks glued to the set clock (≈1/5 beat). Quantize used to fight this.
-          const looping = store.doc.decks[deck].loopBars != null;
+          useSetStore.getState().dispatch({ type: "deck.play", deck }, "system");
+        } else {
+          const drift = Math.abs(engineBars - trackBars);
+          const looping = useSetStore.getState().doc.decks[deck].loopBars != null;
           const spinning = isBackspinDeck(doc, setBars, deck);
-          if (!looping && !spinning) {
-            seekExact(trackBars);
+          const now = performance.now();
+          // Re-seeking a live deck mid-overlap is audible stutter. While both
+          // decks are up, only hard-correct big drift, rarely; solo decks can
+          // correct small drift more freely.
+          const overlapLive = wanted.size > 1;
+          const driftFloor = overlapLive ? 1.0 : 0.35;
+          const cooldownMs = overlapLive ? 600 : 300;
+          if (
+            !looping &&
+            !spinning &&
+            drift > driftFloor &&
+            now >= this.suppressDriftUntil &&
+            now - (this.lastDriftSeekMs[deck] ?? 0) >= cooldownMs
+          ) {
+            this.lastDriftSeekMs[deck] = now;
+            audioEngine.seekPlayingTo(deck, trackBars);
+            useSetStore.getState().patchLive((d) => ({
+              ...d,
+              decks: {
+                ...d.decks,
+                [deck]: { ...d.decks[deck], positionBars: trackBars },
+              },
+            }));
           }
         }
       } else {
@@ -413,20 +625,46 @@ class SetPerformer {
     const spans = buildTimeline(doc);
     for (const span of spans) {
       const kind = span.entry.transition.type;
-      if ((kind !== "loop_out" && kind !== "loop_roll") || span.overlapBars <= 0) continue;
+      if (
+        (kind !== "loop_out" && kind !== "loop_roll" && kind !== "tease_slam") ||
+        span.overlapBars <= 0
+      )
+        continue;
       const prev = spans[span.entryIndex - 1];
       if (!prev) continue;
       const start = span.setStart;
       const end = Math.min(span.setStart + span.overlapBars, prev.setEnd);
       if (setBars < start || setBars >= end) continue;
+      const deck = prev.deck;
+      const d = doc.decks[deck];
+      if (kind === "tease_slam") {
+        // The pad move into the slam: stutter the outgoing 1 → 0.5 over the
+        // final 2 bars of the build. Earlier in the tease the deck runs free
+        // (clear a stale roll if the user seeks back into the window).
+        if (setBars < end - 2) {
+          if (d.loopBars != null) {
+            useSetStore.getState().dispatch(
+              { type: "deck.setLoop", deck, bars: 0 },
+              "system",
+            );
+          }
+          continue;
+        }
+        const rollLen = setBars < end - 1 ? 1 : 0.5;
+        const rollIn = Math.max(prev.entry.inBars, prev.entry.outBars - rollLen);
+        if (d.loopBars === rollLen && d.loopInBars === rollIn) continue;
+        useSetStore.getState().dispatch(
+          { type: "deck.setLoop", deck, bars: rollLen, inBars: rollIn },
+          "system",
+        );
+        continue;
+      }
       const t = (setBars - start) / Math.max(0.01, end - start);
       let loopLen = Math.max(0.5, Math.min(2, span.overlapBars));
       if (kind === "loop_roll") {
         loopLen = t < 0.34 ? 2 : t < 0.67 ? 1 : 0.5;
       }
       const trackLoopIn = Math.max(prev.entry.inBars, prev.entry.outBars - loopLen);
-      const deck = prev.deck;
-      const d = doc.decks[deck];
       if (d.loopBars === loopLen && d.loopInBars === trackLoopIn) continue;
       useSetStore.getState().dispatch(
         { type: "deck.setLoop", deck, bars: loopLen, inBars: trackLoopIn },
@@ -437,20 +675,27 @@ class SetPerformer {
 
   private applyBackspin(doc: SetDoc, setBars: number) {
     const spans = buildTimeline(doc);
+    const spinning = new Set<DeckId>();
     for (const span of spans) {
       if (span.entry.transition.type !== "backspin" || span.overlapBars <= 0) continue;
       const prev = spans[span.entryIndex - 1];
       if (!prev) continue;
-      const start = span.setStart;
-      const end = Math.min(span.setStart + span.overlapBars, prev.setEnd);
-      const spinStart = Math.max(start, end - 0.65);
-      if (setBars < spinStart || setBars >= end) continue;
-      const fromEnd = end - setBars;
-      const trackBars = Math.max(prev.entry.inBars, prev.entry.outBars - fromEnd * 8);
-      useSetStore.getState().dispatch(
-        { type: "deck.seek", deck: prev.deck, positionBars: trackBars, exact: true },
-        "system",
+      const { start, end } = backspinSpinWindow(span, prev);
+      if (setBars < start || setBars >= end) continue;
+      const deck = prev.deck;
+      spinning.add(deck);
+      if (audioEngine.isReversing(deck)) continue;
+      const origin = backspinPlayheadBars(
+        { inBars: prev.entry.inBars, setStart: prev.setStart },
+        start,
+        end,
+        start,
       );
+      const windowSec = ((end - start) * 240) / Math.max(1, this.clockBpm(doc, start));
+      audioEngine.startReverse(deck, origin, windowSec, prev.entry.inBars);
+    }
+    for (const deck of ["A", "B"] as const) {
+      if (!spinning.has(deck)) audioEngine.stopReverse(deck);
     }
   }
 }
@@ -461,9 +706,8 @@ function isBackspinDeck(doc: SetDoc, setBars: number, deck: DeckId): boolean {
     if (span.entry.transition.type !== "backspin" || span.overlapBars <= 0) continue;
     const prev = spans[span.entryIndex - 1];
     if (!prev || prev.deck !== deck) continue;
-    const start = span.setStart;
-    const end = Math.min(span.setStart + span.overlapBars, prev.setEnd);
-    if (setBars >= Math.max(start, end - 0.65) && setBars < end) return true;
+    const { start, end } = backspinSpinWindow(span, prev);
+    if (setBars >= start && setBars < end) return true;
   }
   return false;
 }
