@@ -10,6 +10,55 @@ import { TRANSITION_TYPES, type TransitionType } from "../types/setdoc";
 
 const ARCS = ["journey", "peak_time", "warm_up", "cool_down", "chill", "power_block"] as const;
 
+function BarStepper({
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (next: number) => void;
+}) {
+  const clamped = Math.min(max, Math.max(min, value));
+  return (
+    <div className="set-stepper">
+      <button
+        type="button"
+        className="set-step"
+        aria-label="Decrease"
+        disabled={clamped <= min}
+        onClick={() => onChange(Math.max(min, clamped - 1))}
+      >
+        −
+      </button>
+      <input
+        type="number"
+        className="mono"
+        min={min}
+        max={max}
+        step={1}
+        value={clamped}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          if (!Number.isFinite(n)) return;
+          onChange(Math.min(max, Math.max(min, Math.round(n))));
+        }}
+      />
+      <button
+        type="button"
+        className="set-step"
+        aria-label="Increase"
+        disabled={clamped >= max}
+        onClick={() => onChange(Math.min(max, clamped + 1))}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 export function SetPanel() {
   const arrangement = useSetStore((s) => s.doc.arrangement);
   const tracks = useSetStore((s) => s.doc.tracks);
@@ -113,25 +162,6 @@ export function SetPanel() {
   return (
     <aside className="flyout set-panel">
       <PanelHeader title="Set">
-        <select
-          className="panel-action"
-          value={bookTopic}
-          onChange={(e) => setBookTopic(e.target.value as PlaybookTopic)}
-          title="Playbook chapter"
-        >
-          {PLAYBOOK_TOPICS.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="panel-action"
-          onClick={() => void showJson("get_dj_playbook", { topic: bookTopic }, "playbook")}
-        >
-          Playbook
-        </button>
         <button
           type="button"
           className="panel-action"
@@ -150,6 +180,27 @@ export function SetPanel() {
         </button>
       </PanelHeader>
 
+      <div className="set-toolbar">
+        <select
+          className="set-topic"
+          value={bookTopic}
+          onChange={(e) => setBookTopic(e.target.value as PlaybookTopic)}
+          title="Playbook chapter"
+        >
+          {PLAYBOOK_TOPICS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void showJson("get_dj_playbook", { topic: bookTopic }, "playbook")}
+        >
+          Playbook
+        </button>
+      </div>
+
       <div className="set-recipe-row">
         <label className="set-intent">
           Intent
@@ -162,6 +213,7 @@ export function SetPanel() {
         </label>
         <button
           type="button"
+          className="primary"
           disabled={preparing || trackCount < 2}
           onClick={() => void runPrepare()}
         >
@@ -253,16 +305,17 @@ export function SetPanel() {
         </div>
       )}
 
+      {automationCount > 0 && (
+        <p className="set-automation">
+          {automationCount} automation lane
+          {automationCount === 1 ? "" : "s"} on set timeline
+        </p>
+      )}
+
       <ol className="set-list">
         {arrangement.length === 0 && !proposal && (
           <li className="set-empty">
             Prepare writes a playable first set from the crate. Play it, or rewrite a join.
-          </li>
-        )}
-        {automationCount > 0 && (
-          <li className="set-empty">
-            {automationCount} automation lane
-            {automationCount === 1 ? "" : "s"} on set timeline
           </li>
         )}
         {arrangement.map((entry, index) => {
@@ -273,53 +326,88 @@ export function SetPanel() {
           return (
             <li key={entry.id} className="set-item">
               <span className="set-index mono">{index + 1}</span>
-              <div>
-                <div className="set-title">{track?.title ?? entry.trackId}</div>
-                <div className="set-sub mono">
-                  {energy != null ? `E${energy}` : ""}
-                  {role ? ` · ${role}` : ""}
+              <div className="set-item-main">
+                <div className="set-item-head">
+                  <div className="set-item-copy">
+                    <div className="set-title" title={track?.title ?? entry.trackId}>
+                      {track?.title ?? entry.trackId}
+                    </div>
+                    <div className="set-sub mono">
+                      {energy != null ? `E${energy}` : ""}
+                      {role ? ` · ${role}` : ""}
+                    </div>
+                  </div>
+                  <div className="set-item-actions">
+                    {index >= 1 && (
+                      <>
+                        <button
+                          type="button"
+                          className="set-recipe"
+                          title="Listen-score this join"
+                          onClick={() =>
+                            void showJson(
+                              "preview_join",
+                              { index, hear: true },
+                              `listen ${index}`,
+                            )
+                          }
+                        >
+                          Ear
+                        </button>
+                        <button
+                          type="button"
+                          className="set-recipe"
+                          title={`Apply ${recipe}`}
+                          onClick={() => void applyRecipe(index)}
+                        >
+                          Rx
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      className="set-remove"
+                      onClick={() => dispatch({ type: "set.remove", index })}
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
                 <div className="set-edit">
                   <label>
                     in
-                    <input
-                      type="number"
-                      className="mono"
-                      min={0}
-                      max={maxOut}
-                      step={1}
+                    <BarStepper
                       value={Math.round(entry.inBars)}
-                      onChange={(e) =>
+                      min={0}
+                      max={Math.max(0, Math.round(maxOut) - 1)}
+                      onChange={(inBars) =>
                         dispatch({
                           type: "set.setTrim",
                           index,
-                          inBars: Number(e.target.value),
-                          outBars: entry.outBars,
+                          inBars,
+                          outBars: Math.max(entry.outBars, inBars + 1),
                         })
                       }
                     />
                   </label>
                   <label>
                     out
-                    <input
-                      type="number"
-                      className="mono"
-                      min={entry.inBars + 1}
-                      max={maxOut}
-                      step={1}
+                    <BarStepper
                       value={Math.round(entry.outBars)}
-                      onChange={(e) =>
+                      min={Math.round(entry.inBars) + 1}
+                      max={Math.round(maxOut)}
+                      onChange={(outBars) =>
                         dispatch({
                           type: "set.setTrim",
                           index,
                           inBars: entry.inBars,
-                          outBars: Number(e.target.value),
+                          outBars,
                         })
                       }
                     />
                   </label>
                   {index >= 1 && (
-                    <>
+                    <div className="set-edit-join">
                       <label>
                         join
                         <select
@@ -342,56 +430,24 @@ export function SetPanel() {
                       </label>
                       <label>
                         bars
-                        <input
-                          type="number"
-                          className="mono"
+                        <BarStepper
+                          value={entry.transition.bars}
                           min={0}
                           max={32}
-                          step={1}
-                          value={entry.transition.bars}
-                          onChange={(e) =>
+                          onChange={(bars) =>
                             dispatch({
                               type: "set.setTransition",
                               index,
                               transition: entry.transition.type,
-                              bars: Number(e.target.value),
+                              bars,
                             })
                           }
                         />
                       </label>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>
-              {index >= 1 && (
-                <>
-                  <button
-                    type="button"
-                    className="set-recipe"
-                    title="Listen-score this join"
-                    onClick={() =>
-                      void showJson("preview_join", { index, hear: true }, `listen ${index}`)
-                    }
-                  >
-                    Ear
-                  </button>
-                  <button
-                    type="button"
-                    className="set-recipe"
-                    title={`Apply ${recipe}`}
-                    onClick={() => void applyRecipe(index)}
-                  >
-                    Rx
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                className="set-remove"
-                onClick={() => dispatch({ type: "set.remove", index })}
-              >
-                ×
-              </button>
             </li>
           );
         })}

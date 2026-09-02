@@ -983,14 +983,9 @@ export function verifySet(
             severity: "warn",
           });
         }
-        if (!doc.decks.A.keylock || !doc.decks.B.keylock) {
-          issues.push({
-            code: "ride_without_keylock",
-            index: i,
-            message: `tempo_ride at join ${i} — turn keylock ON on both decks or the ride bends pitch.`,
-            severity: "warn",
-          });
-        }
+        // Keylock is the performer's business during a ride: the outgoing
+        // deck rides keylock-off (the pitch climb is the point), the incoming
+        // stays locked so the drop lands true. No warn — that IS the move.
       }
       const from = ta.analysis.key.camelot;
       const to = tb.analysis.key.camelot;
@@ -1189,7 +1184,16 @@ export function verifySet(
       });
     }
     const spread = Math.max(...levels) - Math.min(...levels);
-    if (spread <= 1) {
+    // Only actionable when the CRATE has range the set failed to use — with
+    // a flat crate every possible order is flat, and the warn is noise.
+    const crateLevels = Object.values(doc.tracks)
+      .map((t) => deriveEnergyLevel(t))
+      .filter((n): n is number => n != null);
+    const crateSpread =
+      crateLevels.length >= 2
+        ? Math.max(...crateLevels) - Math.min(...crateLevels)
+        : 0;
+    if (spread <= 1 && crateSpread >= 2) {
       issues.push({
         code: "energy_monotone",
         message: `Energy levels ${levels.join("→")} are flat — add a builder, peak, or reset.`,

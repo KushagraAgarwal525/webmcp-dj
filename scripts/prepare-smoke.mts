@@ -4,7 +4,7 @@
  */
 import { createEmptySetDoc, type Track, type TrackAnalysis } from "../src/types/setdoc.ts";
 import { chooseJoinFromRecords, inferNight, prepareSet } from "../src/set/prepareSet.ts";
-import { buildTimeline, compileTransitionAutomation } from "../src/set/timeline.ts";
+import { buildTimeline, clockBpmAt, compileTransitionAutomation } from "../src/set/timeline.ts";
 import { alignDropJoin, alignEchoJoin, alignTeaseJoin, findHoleBars, findPeakDropBars, isSlamRecipe, planSetArc } from "../src/set/craft.ts";
 import { isolatorOverlapCap, padOverlapCap, safeLeaveBars, vocalCovers } from "../src/set/builder.ts";
 
@@ -1086,6 +1086,99 @@ assert(
   "tempo_ride without a tempo lane must fail verify",
 );
 assert(!bareGate.ready, "bare ride must not be ready");
+
+// ─── clockBpmAt: un-laned overlaps follow the OUTGOING deck (drift fix) ───
+{
+  const clockDoc = createEmptySetDoc("Clock");
+  clockDoc.tracks = { t1: opener, t2: weapon }; // 126 vs 128
+  clockDoc.arrangement = [
+    { id: "ck0", trackId: "t1", inBars: 0, outBars: 32, transition: { type: "cut", bars: 1 } },
+    { id: "ck1", trackId: "t2", inBars: 8, outBars: 40, transition: { type: "tease_slam", bars: 16 } },
+  ];
+  // spans: [0,32] deck A, [16,48] deck B — overlap [16,32].
+  assert(clockBpmAt(clockDoc, 10) === 126, "solo stretch follows the playing deck");
+  assert(
+    clockBpmAt(clockDoc, 24) === 126,
+    `un-laned overlap must follow the OUTGOING deck (both decks rate-match to it), got ${clockBpmAt(clockDoc, 24)}`,
+  );
+  assert(clockBpmAt(clockDoc, 40) === 128, "after the commit the clock is the incoming's");
+  const laned = {
+    ...clockDoc,
+    automation: [
+      {
+        id: "tl1",
+        param: "tempo" as const,
+        startBars: 16,
+        endBars: 32,
+        startValue: 126,
+        endValue: 128,
+        curve: "linear" as const,
+      },
+    ],
+  };
+  const mid = clockBpmAt(laned, 24);
+  assert(Math.abs(mid - 127) < 0.2, `the tempo lane drives the clock mid-ride, got ${mid}`);
+}
+
+// ─── reviewBounce: the agent's ear measures the render, not the narration ───
+const { reviewBounce } = await import("../src/set/reviewSet.ts");
+{
+  const sr = 44100;
+  const secPerBar = 2; // linear map: 120bpm 4/4
+  const durBars = 48;
+  const len = Math.floor(durBars * secPerBar * sr);
+  const mkSamples = (shape: (bar: number) => { full: number; mid: number }) => {
+    const out = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      const bar = i / (sr * secPerBar);
+      const { full, mid } = shape(bar);
+      const t = i / sr;
+      out[i] = full * Math.sin(2 * Math.PI * 110 * t) + mid * Math.sin(2 * Math.PI * 880 * t);
+    }
+    return out;
+  };
+  const revDoc = createEmptySetDoc("Review");
+  revDoc.tracks = { t1: opener, t2: weapon };
+  revDoc.arrangement = [
+    { id: "r0", trackId: "t1", inBars: 0, outBars: 32, transition: { type: "cut", bars: 1 } },
+    { id: "r1", trackId: "t2", inBars: 8, outBars: 40, transition: { type: "tease_slam", bars: 16 } },
+  ];
+  const linearMap = (b: number) => b * secPerBar;
+
+  // Good join: steady lows, mids rise through the tease, slight lift on the 1.
+  const good = mkSamples((bar) => ({
+    full: bar >= 32 ? 0.17 : 0.15,
+    mid: bar < 16 ? 0.05 : bar < 32 ? 0.05 + 0.1 * ((bar - 16) / 16) : 0.15,
+  }));
+  const goodReview = reviewBounce(revDoc, good, sr, linearMap);
+  assert(goodReview.joins.length === 1, "one join reviewed");
+  const gj = goodReview.joins[0]!;
+  assert(gj.verdict === "clean", `good join must measure clean, got ${gj.verdict}: ${gj.notes.join(" / ")}`);
+  assert(gj.dead_air === false, "no dead air on a full render");
+  assert(gj.tease_rise != null && gj.tease_rise > 1.05, `tease must rise, got ${gj.tease_rise}`);
+  assert(gj.drop_punch != null && gj.drop_punch >= 0.98, `the 1 must lift, got ${gj.drop_punch}`);
+  assert(gj.bass_stack != null && gj.bass_stack < 1.5, `one bass at a time, got ${gj.bass_stack}`);
+  assert(goodReview.ready, "clean review is ready");
+
+  // Dead air at the commit → broken.
+  const gapped = mkSamples((bar) => ({
+    full: bar >= 31.5 && bar < 33 ? 0 : 0.15,
+    mid: bar >= 31.5 && bar < 33 ? 0 : 0.05,
+  }));
+  const gapReview = reviewBounce(revDoc, gapped, sr, linearMap);
+  assert(gapReview.joins[0]!.dead_air === true, "silence at the 1 must flag dead air");
+  assert(gapReview.joins[0]!.verdict === "broken", "dead air breaks the join");
+  assert(!gapReview.ready, "broken join blocks ready");
+
+  // Hot slam: post-commit runs 4× the build → rough level jump.
+  const hot = mkSamples((bar) => ({ full: bar >= 32 ? 0.6 : 0.15, mid: 0.05 }));
+  const hotReview = reviewBounce(revDoc, hot, sr, linearMap);
+  assert(hotReview.joins[0]!.verdict === "rough", `hot slam must be rough, got ${hotReview.joins[0]!.verdict}`);
+  assert(
+    Math.abs(hotReview.joins[0]!.level_jump_db ?? 0) > 6,
+    `jump must be measured, got ${hotReview.joins[0]!.level_jump_db}`,
+  );
+}
 
 console.log("prepare-smoke ok");
 console.log("inferred", prepared.result.inferred);

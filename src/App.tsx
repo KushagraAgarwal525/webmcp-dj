@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TopBar } from "./editor/TopBar";
 import { IconRail } from "./editor/IconRail";
 import { StatusBar } from "./editor/StatusBar";
@@ -13,6 +13,33 @@ import { audioEngine } from "./audio/engine";
 import { setPerformer } from "./audio/setPerformer";
 import { setDurationBars } from "./set/timeline";
 import "./Toasts.css";
+
+type RailId = "library" | "set" | "agent";
+
+/** Animate open only; close snaps. Same-side swaps (Assets↔Set) stay open. */
+function usePushDrawer<T extends RailId>(active: T | null) {
+  const [open, setOpen] = useState(Boolean(active));
+  const wasOpen = useRef(Boolean(active));
+
+  useEffect(() => {
+    if (active) {
+      if (wasOpen.current) {
+        setOpen(true);
+        return;
+      }
+      setOpen(false);
+      const raf = requestAnimationFrame(() => {
+        wasOpen.current = true;
+        setOpen(true);
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    wasOpen.current = false;
+    setOpen(false);
+  }, [active]);
+
+  return { shown: active, open };
+}
 
 declare global {
   interface Window {
@@ -56,6 +83,10 @@ function Toasts() {
 export default function App() {
   const rail = useSetStore((s) => s.rail);
   const hydrate = useSetStore((s) => s.hydrate);
+  const leftActive = rail === "library" || rail === "set" ? rail : null;
+  const rightActive = rail === "agent" ? rail : null;
+  const left = usePushDrawer(leftActive);
+  const right = usePushDrawer(rightActive);
 
   useEffect(() => {
     void (async () => {
@@ -130,10 +161,20 @@ export default function App() {
       <div className="app-body">
         <IconRail />
         <div className="workspace">
-          {rail === "library" && <LibraryPanel />}
-          {rail === "set" && <SetPanel />}
-          <Workspace />
-          {rail === "agent" && <AgentPanel />}
+          <div
+            className={`workspace-drawer workspace-drawer-left${left.open ? " is-open" : ""}`}
+          >
+            {left.shown === "library" && <LibraryPanel />}
+            {left.shown === "set" && <SetPanel />}
+          </div>
+          <div className="workspace-main">
+            <Workspace />
+          </div>
+          <div
+            className={`workspace-drawer workspace-drawer-right${right.open ? " is-open" : ""}`}
+          >
+            {right.shown === "agent" && <AgentPanel />}
+          </div>
           <Toasts />
         </div>
       </div>

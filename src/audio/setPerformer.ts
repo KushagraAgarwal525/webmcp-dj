@@ -6,6 +6,7 @@ import {
   backspinPlayheadBars,
   backspinSpinWindow,
   buildTimeline,
+  clockBpmAt,
   entryBpm,
   joinIsClockIndependent,
   livePlayheadBars,
@@ -37,6 +38,8 @@ class SetPerformer {
   private suppressDriftUntil = 0;
   private hiddenTimer: ReturnType<typeof setInterval> | undefined;
   private visibilityWatch = false;
+  /** Decks WE unlocked for a ride scream → the track they rode (safe restore). */
+  private rideKeylockOff = new Map<DeckId, string>();
 
   isPlaying() {
     return useSetStore.getState().transport.setPlaying;
@@ -142,8 +145,64 @@ class SetPerformer {
         useSetStore.getState().dispatch({ type: "deck.pause", deck }, "system");
       }
     }
+    // Restore ride keylocks while the decks are stopped — click-free.
+    for (const deck of this.rideKeylockOff.keys()) {
+      if (!useSetStore.getState().doc.decks[deck].keylock) {
+        useSetStore.getState().dispatch(
+          { type: "deck.setOptions", deck, keylock: true },
+          "system",
+        );
+      }
+    }
+    this.rideKeylockOff.clear();
     this.active = {};
     useSetStore.getState().setActivity("Paused");
+  }
+
+  /**
+   * Vinyl pitch drama on tempo rides — dosed. Only the FINAL 4 bars of the
+   * lane unlock the OUTGOING deck's keylock: the scream stacks with the HP
+   * rise and the loop roll where the build peaks. A full-window unlock lets
+   * the pitch creep for 12+ bars — the bass rises off its sweet spot and the
+   * record goes thin (that read as "dull"). The incoming deck keeps keylock
+   * so the drop lands pitch-true with no stretch-toggle click on the 1.
+   * Restore once the deck is idle OR has moved to another record (the engine
+   * restarts the source on load anyway, so the toggle rides along) — before
+   * the track check, a deck that rolled straight into the next span kept
+   * keylock off for the whole record.
+   */
+  private applyRideKeylock(doc: SetDoc, setBars: number) {
+    const activeLane = allAutomation(doc).find(
+      (l) => l.param === "tempo" && setBars >= l.startBars && setBars <= l.endBars,
+    );
+    const screaming = activeLane != null && setBars >= activeLane.endBars - 4;
+    if (screaming) {
+      const live = buildTimeline(doc).filter(
+        (s) => setBars >= s.setStart && setBars < s.setEnd,
+      );
+      if (live.length > 1) {
+        const outgoing = live.reduce((a, b) => (a.setStart <= b.setStart ? a : b));
+        const deck = outgoing.deck;
+        if (doc.decks[deck].keylock) {
+          useSetStore.getState().dispatch(
+            { type: "deck.setOptions", deck, keylock: false },
+            "system",
+          );
+        }
+        this.rideKeylockOff.set(deck, outgoing.entry.trackId);
+      }
+      return;
+    }
+    for (const [deck, rodeTrack] of this.rideKeylockOff) {
+      const d = doc.decks[deck];
+      if (!d.keylock && (!d.playing || d.trackId !== rodeTrack)) {
+        useSetStore.getState().dispatch(
+          { type: "deck.setOptions", deck, keylock: true },
+          "system",
+        );
+        this.rideKeylockOff.delete(deck);
+      }
+    }
   }
 
   async seek(setBars: number) {
@@ -230,6 +289,7 @@ class SetPerformer {
     }
     this.applyAutomation(doc, this.positionBars);
     this.applyBackspin(doc, this.positionBars);
+    this.applyRideKeylock(doc, this.positionBars);
   }
 
   private async playLooseDecks() {
@@ -260,6 +320,7 @@ class SetPerformer {
 
     this.applyAutomation(doc, this.positionBars);
     this.applyLoopOut(doc, this.positionBars);
+    this.applyRideKeylock(doc, this.positionBars);
     if (typeof document === "undefined" || document.visibilityState === "visible") {
       void this.queueSyncDecks(doc, this.positionBars, true);
     }
@@ -424,16 +485,10 @@ class SetPerformer {
   }
 
   private clockBpm(doc: SetDoc, setBars: number): number {
-    const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", setBars);
-    if (tempoAuto != null && tempoAuto > 0) return tempoAuto;
-    const spans = buildTimeline(doc);
-    const live = [...spans]
-      .reverse()
-      .find((s) => setBars >= s.setStart && setBars < s.setEnd);
-    if (live) return entryBpm(doc, live.entry);
-    const ended = [...spans].reverse().find((s) => s.setEnd <= setBars);
-    if (ended) return entryBpm(doc, ended.entry);
-    return spans[0] ? entryBpm(doc, spans[0].entry) : 120;
+    // Shared with the offline bounce — during un-laned overlaps the clock
+    // follows the outgoing deck (the one still driving), never the parked
+    // incoming span's native bpm.
+    return clockBpmAt(doc, setBars);
   }
 
   private deckTargetBpm(doc: SetDoc, setBars: number, span: TimelineSpan): number {

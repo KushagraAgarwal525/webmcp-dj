@@ -1,5 +1,5 @@
 .agent-panel {
-  width: min(380px, 42vw);
+  width: min(var(--drawer-right-w), 42vw);
 }
 
 .agent-badge {

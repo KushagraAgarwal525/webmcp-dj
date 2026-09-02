@@ -34,6 +34,7 @@ const FILES = (process.env.EVAL_FILES ?? "")
 const OUT = process.env.EVAL_OUT ?? "eval-scorecard.json";
 
 const SLAM_RECIPES = new Set([
+  "tease_slam",
   "power_cut",
   "air_cut",
   "backspin",
@@ -198,7 +199,12 @@ async function main() {
     await mcp(page, "prepare_set", { hear: true, apply: true }, 300_000),
   ) as {
     inferred?: { reason?: string };
-    joins?: Array<{ recipe: string; bars: number; verdict: string }>;
+    joins?: Array<{
+      recipe: string;
+      bars: number;
+      verdict: string;
+      commit?: { commit_on_drop?: boolean | null } | null;
+    }>;
     entries?: Array<{ title: string; in_bars: number; out_bars: number; transition: string }>;
     verify?: { ready: boolean };
   };
@@ -207,6 +213,7 @@ async function main() {
   const joins = prepared.joins ?? [];
   const entries = prepared.entries ?? [];
   const slams = joins.filter((j) => SLAM_RECIPES.has(j.recipe)).length;
+  const onDrop = joins.filter((j) => j.commit?.commit_on_drop === true).length;
   const distinct = new Set(joins.map((j) => j.recipe)).size;
   const onGrid = entries.filter(
     (e) => e.in_bars % 8 === 0 && e.out_bars % 8 === 0,
@@ -242,6 +249,22 @@ async function main() {
   const worstJump = jumps[0] ?? 0;
   const medianJump = jumps[Math.floor(jumps.length / 2)] ?? 0;
 
+  // The agent's ear, run on the same arrangement: per-join measurements from
+  // a fresh in-page bounce (dead air, level jump, bass stack, tease rise,
+  // drop punch).
+  const review = parseToolJson(await mcp(page, "review_set", {}, 600_000)) as {
+    clean?: number;
+    rough?: number;
+    broken?: number;
+    mean_abs_jump_db?: number;
+    ready?: boolean;
+    joins?: Array<{ index: number; type: string; verdict: string; notes: string[] }>;
+  };
+  console.log(
+    "review:",
+    `${review.clean ?? "?"} clean / ${review.rough ?? "?"} rough / ${review.broken ?? "?"} broken`,
+  );
+
   const scorecard = {
     files: FILES.length,
     order: entries.map((e) => e.title),
@@ -254,6 +277,17 @@ async function main() {
     phrase_snap: entries.length ? Number((onGrid / entries.length).toFixed(2)) : null,
     monotone,
     verify_ready: prepared.verify?.ready ?? false,
+    commit_on_drop: joins.length ? Number((onDrop / joins.length).toFixed(2)) : null,
+    review: {
+      clean: review.clean ?? null,
+      rough: review.rough ?? null,
+      broken: review.broken ?? null,
+      ready: review.ready ?? null,
+      mean_abs_jump_db: review.mean_abs_jump_db ?? null,
+      joins: (review.joins ?? []).map(
+        (j) => `${j.index}:${j.type} ${j.verdict}${j.notes.length ? ` (${j.notes[0]})` : ""}`,
+      ),
+    },
     bounce: {
       seconds: Number((samples.length / sampleRate).toFixed(0)),
       worst_loudness_jump_db: Number((worstJump * 20).toFixed(1)),

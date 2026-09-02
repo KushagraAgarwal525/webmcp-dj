@@ -19,6 +19,7 @@ export const TOOL_UI_MAP: Record<string, ToolUiSurface> = {
   get_dj_playbook: "set",
   get_mix_points: "library",
   verify_set: "set",
+  review_set: "set",
   apply_transition_recipe: "set",
   get_crate_health: "library",
   plan_set_arc: "set",

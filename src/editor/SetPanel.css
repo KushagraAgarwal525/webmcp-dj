@@ -1,3 +1,46 @@
+.set-panel .panel-action {
+  color: var(--ink);
+}
+
+.set-panel .panel-action[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.set-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+
+.set-toolbar .set-topic,
+.set-toolbar button {
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.set-toolbar .set-topic {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.set-toolbar button {
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.set-toolbar button:hover {
+  border-color: color-mix(in srgb, var(--banana) 40%, var(--line));
+}
+
 .set-list {
   list-style: none;
   margin: 0;
@@ -12,21 +55,62 @@
   font-size: 12px;
 }
 
+.set-automation {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .set-item {
   display: grid;
-  grid-template-columns: 28px 1fr auto auto auto;
+  grid-template-columns: 28px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
 }
 
-.set-edit {
+.set-item-main {
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.set-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.set-item-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.set-edit {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px 8px;
   align-items: end;
-  margin-top: 6px;
+}
+
+.set-edit-join {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(88px, 0.8fr);
+  gap: 6px 8px;
+  align-items: end;
 }
 
 .set-edit label {
@@ -37,32 +121,89 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
+  min-width: 0;
 }
 
-.set-edit input,
 .set-edit select {
-  height: 22px;
-  min-width: 44px;
-  max-width: 110px;
-  padding: 0 4px;
+  width: 100%;
+  height: 28px;
+  min-width: 0;
+  padding: 0 6px;
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--ink);
   font-size: 11px;
 }
 
-.set-edit select {
-  max-width: 118px;
+.set-stepper {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 24px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.set-stepper input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0 4px;
+  border: none;
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.set-stepper input::-webkit-outer-spin-button,
+.set-stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.set-step {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.set-step:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--banana) 18%, var(--surface-2));
+  color: var(--banana);
+}
+
+.set-step:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .set-recipe {
+  height: 24px;
   border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
+  background: var(--surface);
+  color: var(--ink);
   font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+}
+
+.set-recipe:hover {
+  border-color: color-mix(in srgb, var(--banana) 40%, var(--line));
 }
 
 .set-recipe-row {
@@ -80,24 +221,56 @@
   font-size: 11px;
   color: var(--muted);
   flex: 1;
+  min-width: 0;
 }
 
 .set-recipe-row select,
 .set-recipe-row input {
-  font-size: 12px;
-}
-
-.set-intent {
-  flex: 2;
-}
-
-.set-intent input {
-  height: 26px;
+  width: 100%;
+  height: 28px;
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--ink);
+  font-size: 12px;
+}
+
+.set-recipe-row button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.set-recipe-row button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--banana) 40%, var(--line));
+}
+
+.set-recipe-row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.set-recipe-row button.primary {
+  background: linear-gradient(180deg, var(--banana), #c9a800);
+  border-color: var(--banana);
+  color: #111;
+  font-weight: 600;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--banana) 35%, transparent);
+}
+
+.set-recipe-row button.primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.set-intent {
+  flex: 2;
 }
 
 .set-verify {
@@ -116,12 +289,15 @@
 .set-index {
   color: var(--muted);
   font-size: 11px;
-  padding-top: 2px;
+  padding-top: 4px;
 }
 
 .set-title {
   font-size: 13px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .set-sub {
@@ -131,11 +307,20 @@
 }
 
 .set-remove {
+  width: 24px;
+  height: 24px;
   border: none;
   background: transparent;
   color: var(--muted);
   font-size: 16px;
   line-height: 1;
+  border-radius: var(--radius-sm);
+  padding: 0;
+}
+
+.set-remove:hover {
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .proposal-card {
@@ -174,11 +359,12 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel);
+  color: var(--ink);
   font-size: 12px;
 }
 
 .proposal-actions .accept {
-  background: var(--banana);
+  background: linear-gradient(180deg, var(--banana), #c9a800);
   border-color: var(--banana);
   color: #111;
   font-weight: 600;

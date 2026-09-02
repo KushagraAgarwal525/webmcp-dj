@@ -10,6 +10,7 @@ import {
   BACKSPIN_REWIND_BARS,
   backspinSpinWindow,
   buildTimeline,
+  clockBpmAt,
   entryBpm,
   joinIsClockIndependent,
   sampleAutomation,
@@ -51,16 +52,9 @@ function barSec(bpm: number) {
 }
 
 function clockBpm(doc: SetDoc, setBars: number): number {
-  const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", setBars);
-  if (tempoAuto != null && tempoAuto > 0) return tempoAuto;
-  const spans = buildTimeline(doc);
-  const live = [...spans]
-    .reverse()
-    .find((s) => setBars >= s.setStart && setBars < s.setEnd);
-  if (live) return entryBpm(doc, live.entry);
-  const ended = [...spans].reverse().find((s) => s.setEnd <= setBars);
-  if (ended) return entryBpm(doc, ended.entry);
-  return spans[0] ? entryBpm(doc, spans[0].entry) : 120;
+  // Shared with the live performer (timeline.clockBpmAt) — the bounce clock
+  // must integrate the exact same set-time the room hears.
+  return clockBpmAt(doc, setBars);
 }
 
 function deckTargetBpm(doc: SetDoc, setBars: number, span: TimelineSpan): number {
@@ -273,14 +267,51 @@ function makeDeckChain(ctx: OfflineAudioContext, master: GainNode, fxIn: GainNod
   return { input, eqLow, eqMid, eqHigh, filter, gain, send };
 }
 
+export type SetClockMap = {
+  durationSec: number;
+  barsToSec: (bars: number) => number;
+};
+
 /**
- * Offline bounce of the arrangement (transitions + automation) to a WAV blob.
- * Tempo uses playbackRate (no SoundTouch keylock in OfflineAudioContext).
+ * Set-clock → wall-second map with mixer carry-forward — the same integration
+ * the bounce uses, exported so review_set can point at the render in bars.
  */
-export async function renderSetToWav(
+export function setClockMap(doc: SetDoc): SetClockMap {
+  const durBars = setDurationBars(doc);
+  const lanes = allAutomation(doc);
+  let snap = baselineMixer(doc);
+  let sec = 0;
+  const steps: { bars: number; sec: number }[] = [];
+  for (let bars = 0; bars <= durBars + 1e-6; bars += STEP_BARS) {
+    snap = sampleMixer(doc, bars, snap, lanes);
+    steps.push({ bars, sec });
+    sec += STEP_BARS * barSec(snap.bpm);
+  }
+  const durationSec = Math.min(MAX_SECONDS, steps[steps.length - 1]?.sec ?? 0);
+  const barsToSec = (bars: number): number => {
+    if (bars <= 0) return 0;
+    if (bars >= steps[steps.length - 1]!.bars) return durationSec;
+    const idx = Math.min(
+      steps.length - 2,
+      Math.max(0, Math.floor(bars / STEP_BARS)),
+    );
+    const a = steps[idx]!;
+    const b = steps[idx + 1] ?? a;
+    const t = (bars - a.bars) / Math.max(1e-6, b.bars - a.bars);
+    return a.sec + (b.sec - a.sec) * t;
+  };
+  return { durationSec, barsToSec };
+}
+
+/**
+ * Offline render of the arrangement to an AudioBuffer. Tempo uses
+ * playbackRate (no SoundTouch keylock in OfflineAudioContext) — the bounce
+ * pitch-bends where live keylocks; loop rolls render like the live watch.
+ */
+export async function renderSetToBuffer(
   doc: SetDoc,
   onProgress?: (p: number, label: string) => void,
-): Promise<RenderSetResult> {
+): Promise<{ buffer: AudioBuffer; durationSec: number; barsToSec: (bars: number) => number }> {
   if (!doc.arrangement.length) {
     throw new Error("Empty arrangement — add tracks to the set first");
   }
@@ -435,6 +466,40 @@ export async function renderSetToWav(
     const spinNext =
       next?.entry.transition.type === "backspin" && next.overlapBars > 0 ? next : null;
 
+    // Loop-roll parity with the live performer's applyLoopOut: when the NEXT
+    // entry rolls the outgoing (loop_out / loop_roll across the window, or
+    // tease_slam's 1→0.5 stutter in the final 2 bars), the tail loops instead
+    // of playing straight through. The forward run stops where the roll starts.
+    const rollNext =
+      next &&
+      next.overlapBars > 0 &&
+      (next.entry.transition.type === "loop_out" ||
+        next.entry.transition.type === "loop_roll" ||
+        next.entry.transition.type === "tease_slam")
+        ? next
+        : null;
+    const rollPhases: { from: number; to: number; len: number }[] = [];
+    if (rollNext) {
+      const winStart = rollNext.setStart;
+      const winEnd = Math.min(rollNext.setStart + rollNext.overlapBars, span.setEnd);
+      const kind = rollNext.entry.transition.type;
+      if (kind === "tease_slam") {
+        rollPhases.push({ from: winEnd - 2, to: winEnd - 1, len: 1 });
+        rollPhases.push({ from: winEnd - 1, to: winEnd, len: 0.5 });
+      } else if (kind === "loop_roll") {
+        const n = winEnd - winStart;
+        rollPhases.push({ from: winStart, to: winStart + n * 0.34, len: 2 });
+        rollPhases.push({ from: winStart + n * 0.34, to: winStart + n * 0.67, len: 1 });
+        rollPhases.push({ from: winStart + n * 0.67, to: winEnd, len: 0.5 });
+      } else {
+        rollPhases.push({
+          from: winStart,
+          to: winEnd,
+          len: Math.max(0.5, Math.min(2, rollNext.overlapBars)),
+        });
+      }
+    }
+
     let fromBars = span.setStart;
     let toBars = span.setEnd;
     let offsetBars = span.entry.inBars;
@@ -479,19 +544,89 @@ export async function renderSetToWav(
       }
     }
 
+    if (rollPhases.length) {
+      toBars = Math.min(toBars, Math.max(rollPhases[0]!.from, span.setStart));
+    }
+
     scheduleForward(span, buffer, nativeBpm, fromBars, toBars, offsetBars);
+
+    if (rollNext && rollPhases.length) {
+      const nativeBar = barSec(nativeBpm);
+      for (const phase of rollPhases) {
+        const pStart = Math.max(phase.from, span.setStart);
+        const pEnd = Math.min(phase.to, span.setEnd);
+        if (pEnd - pStart < 0.02) continue;
+        const loopInBars = Math.max(span.entry.inBars, span.entry.outBars - phase.len);
+        const startSec = barsToSec(pStart);
+        const endSec = Math.min(durationSec, barsToSec(pEnd));
+        if (endSec - startSec < 0.02) continue;
+        const playheadBars = span.entry.inBars + (pStart - span.setStart);
+        const offsetSec = Math.max(
+          0,
+          Math.min(buffer.duration - 0.01, playheadBars * nativeBar),
+        );
+        const loopStartSec = Math.max(0, Math.min(buffer.duration - 0.02, loopInBars * nativeBar));
+        const loopEndSec = Math.max(
+          loopStartSec + 0.03,
+          Math.min(buffer.duration, span.entry.outBars * nativeBar),
+        );
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        src.loopStart = loopStartSec;
+        src.loopEnd = loopEndSec;
+        src.connect(decks[span.deck].input);
+        let armed = false;
+        for (const step of steps) {
+          if (step.bars < pStart - 1e-6) continue;
+          if (step.bars >= pEnd) break;
+          const rate = deckTargetBpm(doc, step.bars, span) / Math.max(1e-6, nativeBpm);
+          const t = Math.max(startSec, step.sec);
+          if (!armed) {
+            src.playbackRate.setValueAtTime(clamp(rate, 0.05, 4), t);
+            armed = true;
+          } else {
+            src.playbackRate.linearRampToValueAtTime(clamp(rate, 0.05, 4), t);
+          }
+        }
+        try {
+          // loop=true: plays the lead-in once, then wraps inside
+          // [loopStart, loopEnd) — the live loop watch's exact shape.
+          src.start(startSec, Math.min(offsetSec, loopEndSec - 0.01));
+          src.stop(endSec);
+        } catch {
+          /* schedule edge */
+        }
+      }
+    }
   }
 
   onProgress?.(0.35, "Rendering…");
   const rendered = await ctx.startRendering();
-  onProgress?.(0.9, "Encoding WAV…");
-  const blob = encodeWav(rendered);
   onProgress?.(1, "Done");
 
   return {
-    blob,
+    buffer: rendered,
     durationSec: rendered.duration,
-    sampleRate: rendered.sampleRate,
+    barsToSec,
+  };
+}
+
+/**
+ * Offline bounce of the arrangement (transitions + automation) to a WAV blob.
+ * Tempo uses playbackRate (no SoundTouch keylock in OfflineAudioContext).
+ */
+export async function renderSetToWav(
+  doc: SetDoc,
+  onProgress?: (p: number, label: string) => void,
+): Promise<RenderSetResult> {
+  const { buffer, durationSec } = await renderSetToBuffer(doc, onProgress);
+  onProgress?.(0.9, "Encoding WAV…");
+  const blob = encodeWav(buffer);
+  return {
+    blob,
+    durationSec,
+    sampleRate: buffer.sampleRate,
     bytes: blob.size,
   };
 }

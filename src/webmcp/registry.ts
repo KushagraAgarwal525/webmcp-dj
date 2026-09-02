@@ -43,6 +43,7 @@ import {
 } from "../set/craft";
 import { crateCard, crateCards, prepareSet } from "../set/prepareSet";
 import { previewJoin } from "../set/previewJoin";
+import { reviewBounce } from "../set/reviewSet";
 import { setPerformer } from "../audio/setPerformer";
 import { assertToolMapped } from "./toolUiMap";
 import { findLyricMatches } from "../lyrics/lrclib";
@@ -66,6 +67,15 @@ function dispatch(command: Command, source: "agent" | "ui" = "agent") {
 
 function getDoc(): SetDoc {
   return useSetStore.getState().doc;
+}
+
+/** Stereo render → mono for the review ear. */
+function monoMix(buffer: AudioBuffer): Float32Array {
+  const l = buffer.getChannelData(0);
+  const r = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : l;
+  const out = new Float32Array(l.length);
+  for (let i = 0; i < l.length; i++) out[i] = ((l[i] ?? 0) + (r[i] ?? 0)) * 0.5;
+  return out;
 }
 
 function deckId(value: unknown): DeckId | null {
@@ -1701,6 +1711,66 @@ export function buildCoreTools() {
   });
 
   defineTool({
+    name: "review_set",
+    title: "Review set (bounce + measure)",
+    description:
+      "Bounce the arrangement offline and MEASURE each join from the rendered audio: dead air at the commit, level jump across the 1, bass stacking during the tease, whether the tease rises, whether the slam lifts. Trust these numbers over imagination — what fails here fails in the room. Loop rolls and tempo rides render like live. Run after prepare_set / apply_transition_recipe, fix rough/broken joins, re-run. Pass index to focus one join.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        index: { type: "number", description: "Optional join index (≥1) to focus" },
+      },
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      const doc = getDoc();
+      if (doc.arrangement.length < 2) throw new Error("need a set (2+ entries) to review");
+      const { renderSetToBuffer } = await import("../audio/renderSet");
+      useSetStore.getState().setActivity("Bouncing for review…");
+      const { buffer, barsToSec } = await renderSetToBuffer(doc, (p, label) => {
+        useSetStore.getState().setActivity(`Review: ${label} ${Math.round(p * 100)}%`);
+      });
+      const mono = monoMix(buffer);
+      const review = reviewBounce(doc, mono, buffer.sampleRate, barsToSec);
+      const idx = input.index != null ? Number(input.index) : null;
+      useSetStore
+        .getState()
+        .setActivity(`Review: ${review.clean} clean · ${review.rough} rough · ${review.broken} broken`);
+      if (idx != null) {
+        const join = review.joins.find((j) => j.index === idx);
+        if (!join) throw new Error(`no join at index ${idx}`);
+        return { ...review, joins: [join], focus: idx };
+      }
+      return review;
+    },
+    localExecute: async (input) => {
+      const doc = getDoc();
+      if (doc.arrangement.length < 2) return toolErr("need a set (2+ entries) to review");
+      try {
+        const { renderSetToBuffer } = await import("../audio/renderSet");
+        useSetStore.getState().setActivity("Bouncing for review…");
+        const { buffer, barsToSec } = await renderSetToBuffer(doc, (p, label) => {
+          useSetStore.getState().setActivity(`Review: ${label} ${Math.round(p * 100)}%`);
+        });
+        const mono = monoMix(buffer);
+        const review = reviewBounce(doc, mono, buffer.sampleRate, barsToSec);
+        const idx = input.index != null ? Number(input.index) : null;
+        useSetStore
+          .getState()
+          .setActivity(`Review: ${review.clean} clean · ${review.rough} rough · ${review.broken} broken`);
+        if (idx != null) {
+          const join = review.joins.find((j) => j.index === idx);
+          if (!join) return toolErr(`no join at index ${idx}`);
+          return toolOk({ ...review, joins: [join], focus: idx });
+        }
+        return toolOk(review);
+      } catch (e) {
+        return toolErr(e instanceof Error ? e.message : "review failed");
+      }
+    },
+  });
+
+  defineTool({
     name: "set_play",
     title: "Play set",
     description:
@@ -2809,6 +2879,7 @@ const OUTPUT_BUDGETS: Record<string, number | null> = {
   get_set_timeline: 10000,
   get_session: 10000,
   verify_set: 8000,
+  review_set: 8000,
   get_set_quality: 8000,
   suggest_compatible: 8000,
   search_library: 10000,
