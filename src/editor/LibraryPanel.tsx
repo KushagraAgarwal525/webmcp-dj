@@ -42,8 +42,8 @@ function TrackRow({ track }: { track: Track }) {
   return (
     <li className="track-row">
       <div className="track-main">
-        <div className="track-title">{track.title}</div>
-        <div className="track-artist">{track.artist || "Unknown artist"}</div>
+        <div className="track-title ph-no-mask">{track.title}</div>
+        <div className="track-artist ph-no-mask">{track.artist || "Unknown artist"}</div>
       </div>
       <div className="track-meta mono">
         {track.analysisStatus === "running" && <span className="pill">analyzing…</span>}

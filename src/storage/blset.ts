@@ -4,6 +4,7 @@ import type { SetDoc } from "../types/setdoc";
 import { normalizeDoc } from "../commands/applyCommand";
 import { readAudioBlob, writeAudioBlob } from "./opfs";
 import { persistSetDoc } from "./db";
+import { captureDownloadBlset } from "../analytics/tools";
 
 const MANIFEST_VERSION = 1;
 
@@ -47,6 +48,7 @@ export async function exportBlset(doc: SetDoc): Promise<void> {
   const out = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
   const safe = (doc.title || "set").replace(/[^\w\-]+/g, "_").slice(0, 48);
   saveAs(out, `${safe}.blset`);
+  captureDownloadBlset(missing);
 
   if (missing > 0) {
     console.warn(`[blset] ${missing} audio file(s) missing from OPFS`);

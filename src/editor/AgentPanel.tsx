@@ -61,7 +61,7 @@ export function AgentPanel() {
         ))}
       </div>
 
-      <div className="agent-compose">
+      <div className="agent-compose ph-mask">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}

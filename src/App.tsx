@@ -12,6 +12,7 @@ import { registerToolsWithBrowser, executeLocalTool, listLocalTools } from "./we
 import { audioEngine } from "./audio/engine";
 import { setPerformer } from "./audio/setPerformer";
 import { setDurationBars } from "./set/timeline";
+import { registerContext } from "./analytics/posthog";
 import "./Toasts.css";
 
 type RailId = "library" | "set" | "agent";
@@ -92,7 +93,8 @@ export default function App() {
     void (async () => {
       const saved = await loadActiveSetDoc();
       if (saved) hydrate(saved);
-      await registerToolsWithBrowser();
+      const webmcp = await registerToolsWithBrowser();
+      registerContext({ webmcp_on: webmcp });
       await audioEngine.ensure();
       window.__bananalabs = {
         listTools: listLocalTools,

@@ -54,7 +54,7 @@ export function ProposalBanner() {
         {changes.map((c) => (
           <li key={`${c.i}-${c.title}`}>
             <span className="mono idx">{c.i}</span>
-            <span className="name">{c.title}</span>
+            <span className="name ph-no-mask">{c.title}</span>
             <span className="mono detail">
               {c.bpm != null ? `${c.bpm.toFixed(0)}` : "—"} BPM
               {c.key ? ` · ${c.key}` : ""} · {c.inBars.toFixed(0)}–{c.outBars.toFixed(0)}b

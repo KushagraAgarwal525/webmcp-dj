@@ -18,6 +18,7 @@ import {
   type TimelineSpan,
 } from "../set/timeline";
 import { encodeWav } from "./encodeWav";
+import { captureDownloadWav } from "../analytics/tools";
 import { reversedSlice } from "./reverseSlice";
 
 const STEP_BARS = 1 / 16;
@@ -643,5 +644,6 @@ export async function downloadSetWav(
       .replace(/_+/g, "_")
       .slice(0, 64) || "bananalabs-set";
   saveAs(result.blob, `${safe}.wav`);
+  captureDownloadWav(result.bytes, result.durationSec);
   return result;
 }

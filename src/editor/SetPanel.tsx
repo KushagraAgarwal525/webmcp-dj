@@ -329,7 +329,7 @@ export function SetPanel() {
               <div className="set-item-main">
                 <div className="set-item-head">
                   <div className="set-item-copy">
-                    <div className="set-title" title={track?.title ?? entry.trackId}>
+                    <div className="set-title ph-no-mask" title={track?.title ?? entry.trackId}>
                       {track?.title ?? entry.trackId}
                     </div>
                     <div className="set-sub mono">

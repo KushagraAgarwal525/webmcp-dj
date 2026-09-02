@@ -19,6 +19,7 @@
     "idb-keyval": "^6.3.0",
     "immer": "^11.1.18",
     "jszip": "^3.10.1",
+    "posthog-js": "^1.425.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "zustand": "^5.0.15"
