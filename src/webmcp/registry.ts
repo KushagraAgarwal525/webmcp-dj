@@ -50,6 +50,7 @@ import { findLyricMatches } from "../lyrics/lrclib";
 import { audioEngine } from "../audio/engine";
 import { phaseAlignBars } from "../audio/phaseAlign";
 import { getPlaybookPayload, TRANSITION_RECIPES } from "../agent/djPlaybook";
+import { captureToolCall } from "../analytics/tools";
 
 type LocalTool = ModelContextTool & {
   localExecute: (
@@ -2956,10 +2957,18 @@ export async function registerToolsWithBrowser(): Promise<boolean> {
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
         execute: async (input, { signal }) => {
-          const result = await tool.execute(input ?? {}, { signal });
-          return typeof result === "string"
-            ? result
-            : toolResult(result, OUTPUT_BUDGETS[tool.name]);
+          const args = input ?? {};
+          const t0 = performance.now();
+          try {
+            const result = await tool.execute(args, { signal });
+            captureToolCall(tool.name, "webmcp", args, result, performance.now() - t0, false);
+            return typeof result === "string"
+              ? result
+              : toolResult(result, OUTPUT_BUDGETS[tool.name]);
+          } catch (e) {
+            captureToolCall(tool.name, "webmcp", args, e, performance.now() - t0, true);
+            throw e;
+          }
         },
       },
       { signal: controller.signal },
@@ -2980,7 +2989,18 @@ export async function executeLocalTool(
   if (!localTools.size) buildCoreTools();
   const tool = localTools.get(name);
   if (!tool) return toolErr(`unknown tool: ${name}`);
-  return tool.localExecute(input, signal ?? new AbortController().signal);
+  const t0 = performance.now();
+  try {
+    const result = await tool.localExecute(
+      input,
+      signal ?? new AbortController().signal,
+    );
+    captureToolCall(name, "local", input, result, performance.now() - t0, false);
+    return result;
+  } catch (e) {
+    captureToolCall(name, "local", input, e, performance.now() - t0, true);
+    throw e;
+  }
 }
 
 export function listLocalTools() {

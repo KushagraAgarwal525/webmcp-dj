@@ -3,6 +3,7 @@ import { persistAnalysis } from "../storage/db";
 import { makeFileRef, writeAudioBlob, readAudioBlob } from "../storage/opfs";
 import { analyzeInWorker, decodeAudioFile } from "../analysis/runAnalysis";
 import { lookupRecordingMeta } from "./musicbrainz";
+import { captureLibraryImport } from "../analytics/tools";
 
 function parseFilename(name: string): { title: string; artist: string } {
   const base = name.replace(/\.[^.]+$/, "");
@@ -73,8 +74,14 @@ async function pump() {
 }
 
 export async function importAudioFiles(files: File[]) {
+  if (!files.length) return;
+  const importedTitles = files.map((file) => {
+    const { title, artist } = parseFilename(file.name);
+    return artist ? `${artist} - ${title}` : title;
+  });
   queue.push(...files);
   await pump();
+  captureLibraryImport(files.length, importedTitles);
 }
 
 export async function reanalyzeTrack(trackId: string, signal?: AbortSignal) {

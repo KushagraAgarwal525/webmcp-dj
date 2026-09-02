@@ -315,7 +315,7 @@ function CdjDeck({ deck }: { deck: "A" | "B" }) {
   return (
     <section className={`cdj-deck deck-${deck.toLowerCase()}`}>
       <header className="cdj-info">
-        <div className="cdj-title-block">
+        <div className="cdj-title-block ph-no-mask">
           <span className="cdj-deck-tag">{deck}</span>
           <strong>{track?.title ?? "No track loaded"}</strong>
           <span className="cdj-meta">

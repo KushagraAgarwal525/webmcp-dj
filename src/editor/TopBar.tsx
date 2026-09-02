@@ -112,7 +112,7 @@ export function TopBar() {
       </div>
 
       <input
-        className="topbar-title"
+        className="topbar-title ph-mask"
         value={title}
         aria-label="Set name"
         onChange={(e) =>

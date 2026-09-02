@@ -17,6 +17,7 @@ import {
   type TimelineSpan,
 } from "../set/timeline";
 import { getAudioBuffer, peekAudioBuffer } from "./bufferCache";
+import { captureSetPlay } from "../analytics/tools";
 
 type ActiveSlot = {
   entryIndex: number;
@@ -114,6 +115,7 @@ class SetPerformer {
         entryIndex: 0,
       });
       useSetStore.getState().setActivity("Playing set");
+      captureSetPlay();
 
       // Tempo + mixer first, then load/seek/play so decks never start at native BPM.
       this.lastAutoKey = "";

@@ -94,7 +94,7 @@ export function SetRuler() {
             return (
               <div
                 key={span.entry.id}
-                className={`set-block${span.entryIndex === entryIndex ? " is-active" : ""}`}
+                className={`set-block ph-no-mask${span.entryIndex === entryIndex ? " is-active" : ""}`}
                 style={{
                   width: `${Math.max(4, widthPct)}%`,
                   left: `${leftPct}%`,
