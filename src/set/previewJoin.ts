@@ -226,7 +226,7 @@ export async function previewJoin(
   }
   if (type === "tempo_ride") {
     notes.push(
-      `Ride: both decks ramp ${ta.analysis.bpm.toFixed(1)}→${tb.analysis.bpm.toFixed(1)} across the overlap under keylock; isolator commit on the incoming drop, then peel.`,
+      `Ride: both decks ramp ${ta.analysis.bpm.toFixed(1)}→${tb.analysis.bpm.toFixed(1)} across the overlap — the outgoing unlocks pitch for the final 4 bars (the scream), the incoming stays true; isolator commit on the incoming drop, then peel.`,
     );
   }
   if (type === "tease_slam") {

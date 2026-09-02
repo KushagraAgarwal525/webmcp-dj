@@ -386,10 +386,13 @@ function arcEnergyTargets(levels: number[], arc: SetArcId, style: ComposeStyle =
   const peak = Math.max(...levels);
   if (style === "chop" && n >= 4) {
     const mid = Math.floor(n / 2);
+    // A RESET dip needs range to dip into — with a flat crate (spread < 2)
+    // the "dip" just shuffles same-energy records and reads as zig-zag.
+    const dip = peak - floor >= 2;
     const t: number[] = [];
     for (let k = 0; k < n; k++) {
       if (k === 0) t.push(floor + (peak - floor) * 0.45);
-      else if (k === mid) t.push(floor + (peak - floor) * 0.25);
+      else if (k === mid && dip) t.push(floor + (peak - floor) * 0.25);
       else if (k === n - 1) t.push(peak);
       else t.push(peak - (peak - floor) * 0.08);
     }
@@ -454,7 +457,8 @@ function optimizeOrder(
     let c = slam ? SLAM_COST : BLEND_COST;
     if (style !== "chop" && c > 0 && (pos === 1 || pos === n - 1)) c *= 0.35;
     c += Math.abs(levels[b]! - (targets[pos] ?? levels[b]!)) * 2.4;
-    if (style === "chop" && n >= 4 && pos === Math.floor(n / 2)) {
+    // RESET-slot pushdown only when the crate has the range to dip into.
+    if (style === "chop" && n >= 4 && peakE - floor >= 2 && pos === Math.floor(n / 2)) {
       c += Math.max(0, levels[b]! - (floor + (peakE - floor) * 0.3)) * 3;
     }
     c += Math.max(0, 100 - scorePair(pool[a]!, pool[b]!).score) * 0.1;
@@ -951,7 +955,7 @@ function chooseJoinBlend(outgoing: Track, incoming: Track): JoinPick {
     return {
       recipe: "tempo_ride",
       bars: 16,
-      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks under keylock across a 16-bar isolator, commit on the incoming drop at ${inDrop}.`,
+      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks across a 16-bar isolator (outgoing rides keylock-off), commit on the incoming drop at ${inDrop}.`,
     };
   }
 
@@ -1168,7 +1172,7 @@ export function joinFallbacks(
         rideIsoCap >= 16 &&
         rideMove !== "pay_attention"
       ) {
-        add("tempo_ride", 16, "retry: ride the gap under keylock");
+        add("tempo_ride", 16, "retry: ride the gap");
       }
       add("air_cut", 2, "retry: dead-air slam onto the drop");
       add("backspin", 1, "retry: rewind slam onto the drop");

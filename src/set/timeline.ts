@@ -167,6 +167,28 @@ export function masterBpm(doc: SetDoc): number {
   return doc.decks?.[doc.tempoMaster ?? "A"]?.bpm ?? 120;
 }
 
+/**
+ * The set clock's bpm at a position — single source of truth for the live
+ * performer AND the offline bounce. Tempo lane wins. During an overlap with
+ * no lane, the clock follows the OUTGOING span: both decks rate-match to it
+ * until the commit, so reading the incoming span's native bpm here would run
+ * the clock against the decks and force audible drift-correction seeks.
+ */
+export function clockBpmAt(doc: SetDoc, setBars: number): number {
+  const tempoAuto = sampleAutomation(allAutomation(doc), "tempo", setBars);
+  if (tempoAuto != null && tempoAuto > 0) return tempoAuto;
+  const spans = buildTimeline(doc);
+  const live = spans.filter((s) => setBars >= s.setStart && setBars < s.setEnd);
+  if (live.length > 1) {
+    const outgoing = live.reduce((a, b) => (a.setStart <= b.setStart ? a : b));
+    return entryBpm(doc, outgoing.entry);
+  }
+  if (live.length) return entryBpm(doc, live[live.length - 1]!.entry);
+  const ended = [...spans].reverse().find((s) => s.setEnd <= setBars);
+  if (ended) return entryBpm(doc, ended.entry);
+  return spans[0] ? entryBpm(doc, spans[0].entry) : 120;
+}
+
 export function evalCurve(t: number, curve: AutomationCurve): number {
   const x = Math.min(1, Math.max(0, t));
   switch (curve) {

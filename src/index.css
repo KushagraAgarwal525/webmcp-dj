@@ -17,6 +17,10 @@
   --topbar-h: 48px;
   --rail-w: 56px;
   --statusbar-h: 28px;
+  --drawer-left-w: 360px;
+  --drawer-right-w: 380px;
+  --drawer-ms: 200ms;
+  --drawer-ease: cubic-bezier(0.2, 0, 0, 1);
   --radius: 8px;
   --radius-sm: 6px;
 
@@ -74,29 +78,54 @@ button {
 
 .workspace {
   position: relative;
+  display: flex;
+  flex-direction: row;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
 }
 
+.workspace-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workspace-drawer {
+  flex: 0 0 auto;
+  width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-drawer-left.is-open {
+  width: min(var(--drawer-left-w), 40vw);
+  transition: width var(--drawer-ms) var(--drawer-ease);
+}
+
+.workspace-drawer-right.is-open {
+  width: min(var(--drawer-right-w), 42vw);
+  transition: width var(--drawer-ms) var(--drawer-ease);
+}
+
 .flyout {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--rail-w);
-  width: min(360px, 40vw);
-  z-index: 20;
+  width: min(var(--drawer-left-w), 40vw);
+  height: 100%;
   background: var(--panel);
   border-right: 1px solid var(--line);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.28);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .flyout-right {
-  left: auto;
-  right: 0;
+  width: min(var(--drawer-right-w), 42vw);
   border-right: none;
   border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
 }
