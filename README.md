@@ -25,7 +25,7 @@ Two tiers keep the agent focused:
 - **Compose surface (default)** — `prepare_set`, `plan_set_arc`, `preview_join`, `apply_transition_recipe`, `verify_set`, `review_set`, `search_library`, `tag_track`, `get_dj_playbook`, transport. Big levers, honest echoes (every mutation returns a compile report: where the commit lands, whether it's on the drop).
 - **Booth hardware (`?booth=1`)** — `deck_set_loop`, `hotcue`, `set_eq`, `set_filter`, `set_fader`, `sampler_trigger`, `fx_set`… everything the human UI can do, for when you want the agent to *play*, not just compose.
 
-To let a browser agent discover the tools, run Chrome Canary with WebMCP enabled:
+To let a browser agent discover the tools, use Codex in-built browser or run Chrome Canary with WebMCP enabled:
 
 ```
 chrome://flags/#enable-webmcp-testing
