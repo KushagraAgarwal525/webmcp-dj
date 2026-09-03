@@ -28,7 +28,17 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
+  color: var(--ink);
   font-size: 12px;
+}
+
+.panel-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--banana) 40%, var(--line));
+}
+
+.panel-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .panel-close {
@@ -149,6 +159,12 @@
 }
 
 .track-craft select {
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
   font-size: 11px;
 }
 
@@ -175,7 +191,17 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
+  color: var(--ink);
   font-size: 11px;
+}
+
+.track-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--banana) 40%, var(--line));
+}
+
+.track-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .spark {
