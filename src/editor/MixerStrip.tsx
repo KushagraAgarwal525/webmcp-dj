@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import "./MixerStrip.css";
 import { useSetStore } from "../commands/pipeline";
 import type { DeckId, FxType } from "../types/setdoc";
@@ -5,22 +6,37 @@ import { RotaryKnob } from "./controls/RotaryKnob";
 import { VerticalFader } from "./controls/VerticalFader";
 import { HardwareButton } from "./controls/HardwareButton";
 import { LiveLevelMeter } from "./controls/LevelMeter";
+import { paintMixerDom } from "./controls/mixerVisuals";
+import { audioEngine } from "../audio/engine";
 
 const FX_TYPES: FxType[] = ["off", "delay", "reverb", "echo"];
 
 function ChannelStrip({ deck }: { deck: DeckId }) {
-  const ch = useSetStore((s) => s.doc.mixer.channels[deck]);
-  const fxSend = useSetStore((s) => s.doc.decks[deck].fxSend);
   const cue = useSetStore((s) => s.doc.mixer.channels[deck].cue);
   const hasTrack = useSetStore((s) => Boolean(s.doc.decks[deck].trackId));
   const dispatch = useSetStore((s) => s.dispatch);
+  const live = (path: string) => () => {
+    const d = audioEngine.getLiveMixerDoc();
+    if (path === "fxSend") return d.decks[deck].fxSend;
+    const ch = d.mixer.channels[deck];
+    if (path === "gainDb") return ch.gainDb;
+    if (path === "eqHigh") return ch.eqHigh;
+    if (path === "eqMid") return ch.eqMid;
+    if (path === "eqLow") return ch.eqLow;
+    if (path === "filter") return ch.filter;
+    if (path === "fader") return ch.fader;
+    return 0;
+  };
 
   return (
     <div className="djm-channel">
       <div className="djm-ch-label">{deck}</div>
       <RotaryKnob
         label="Gain"
-        value={ch.gainDb}
+        live
+        livePath={`${deck}.gainDb`}
+        getValue={live("gainDb")}
+        value={0}
         min={-24}
         max={12}
         step={0.5}
@@ -30,7 +46,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       />
       <RotaryKnob
         label="Hi"
-        value={ch.eqHigh}
+        live
+        livePath={`${deck}.eqHigh`}
+        getValue={live("eqHigh")}
+        value={0}
         min={-24}
         max={6}
         step={0.5}
@@ -42,7 +61,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       />
       <RotaryKnob
         label="Mid"
-        value={ch.eqMid}
+        live
+        livePath={`${deck}.eqMid`}
+        getValue={live("eqMid")}
+        value={0}
         min={-24}
         max={6}
         step={0.5}
@@ -54,7 +76,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       />
       <RotaryKnob
         label="Low"
-        value={ch.eqLow}
+        live
+        livePath={`${deck}.eqLow`}
+        getValue={live("eqLow")}
+        value={0}
         min={-24}
         max={6}
         step={0.5}
@@ -66,7 +91,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       />
       <RotaryKnob
         label="Filt"
-        value={ch.filter}
+        live
+        livePath={`${deck}.filter`}
+        getValue={live("filter")}
+        value={0}
         min={-1}
         max={1}
         step={0.01}
@@ -76,7 +104,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       />
       <RotaryKnob
         label="FX"
-        value={fxSend}
+        live
+        livePath={`${deck}.fxSend`}
+        getValue={live("fxSend")}
+        value={0}
         min={0}
         max={1}
         step={0.01}
@@ -89,7 +120,10 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
       <div className="djm-fader-row">
         <LiveLevelMeter deck={deck} height={120} />
         <VerticalFader
-          value={ch.fader}
+          live
+          livePath={`${deck}.fader`}
+          getValue={live("fader")}
+          value={0}
           min={0}
           max={1}
           step={0.01}
@@ -115,21 +149,31 @@ function ChannelStrip({ deck }: { deck: DeckId }) {
 }
 
 export function MixerStrip() {
-  const crossfader = useSetStore((s) => s.doc.mixer.crossfader);
+  const rootRef = useRef<HTMLElement | null>(null);
   const xfaderCurve = useSetStore((s) => s.doc.mixer.xfaderCurve);
-  const masterDb = useSetStore((s) => s.doc.mixer.masterDb);
-  const fx = useSetStore((s) => s.doc.fx);
+  const fxType = useSetStore((s) => s.doc.fx.type);
   const dispatch = useSetStore((s) => s.dispatch);
 
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const el = rootRef.current;
+      if (el) paintMixerDom(el, audioEngine.getLiveMixerDoc());
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   return (
-    <aside className="djm-strip" aria-label="Mixer">
+    <aside ref={rootRef} className="djm-strip" aria-label="Mixer">
       <ChannelStrip deck="A" />
 
       <div className="djm-center">
         <div className="djm-brand">MIX</div>
         <select
           className="djm-fx-select"
-          value={fx.type}
+          value={fxType}
           onChange={(e) =>
             dispatch({ type: "fx.set", fxType: e.target.value as FxType })
           }
@@ -142,17 +186,23 @@ export function MixerStrip() {
         </select>
         <RotaryKnob
           label="Wet"
-          value={fx.wet}
+          live
+          livePath="fx.wet"
+          getValue={() => audioEngine.getLiveMixerDoc().fx.wet}
+          value={0}
           min={0}
           max={1}
           step={0.01}
           size={32}
-          disabled={fx.type === "off"}
+          disabled={fxType === "off"}
           onChange={(wet) => dispatch({ type: "fx.set", wet })}
         />
         <RotaryKnob
           label="Mst"
-          value={masterDb}
+          live
+          livePath="masterDb"
+          getValue={() => audioEngine.getLiveMixerDoc().mixer.masterDb}
+          value={0}
           min={-24}
           max={6}
           step={0.5}
@@ -172,7 +222,10 @@ export function MixerStrip() {
         </HardwareButton>
         <VerticalFader
           label="XF"
-          value={crossfader}
+          live
+          livePath="xfader"
+          getValue={() => audioEngine.getLiveMixerDoc().mixer.crossfader}
+          value={0}
           min={-1}
           max={1}
           step={0.01}
@@ -183,8 +236,8 @@ export function MixerStrip() {
           }
         />
         <div className="djm-xf-leds">
-          <span className={crossfader <= 0.05 ? "on" : ""}>A</span>
-          <span className={crossfader >= -0.05 ? "on" : ""}>B</span>
+          <span data-live="xf-led-a">A</span>
+          <span data-live="xf-led-b">B</span>
         </div>
       </div>
 

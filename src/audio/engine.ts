@@ -1,10 +1,16 @@
 import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import processorUrl from "@soundtouchjs/audio-worklet/processor?url";
-import type { DeckId, SetDoc } from "../types/setdoc";
+import type { AutomationParam, DeckId, SetDoc } from "../types/setdoc";
 import { useSetStore } from "../commands/pipeline";
 import { getAudioBuffer } from "./bufferCache";
 import { allAutomation, BACKSPIN_REWIND_BARS } from "../set/timeline";
 import { reversedSlice } from "./reverseSlice";
+import {
+  adoptMixerCommand,
+  applyAutomationInPlace,
+  cloneLiveMixerDoc,
+  isMixerVisualCommand,
+} from "./liveMixer";
 
 type FilterMode = "allpass" | "lowpass" | "highpass";
 
@@ -67,10 +73,16 @@ class AudioEngine {
   private wasRecording = false;
   /** Last values pushed to each channel's AudioParams — dezipper + skip identical frames. */
   private appliedCh: Partial<Record<DeckId, Record<string, number>>> = {};
+  /**
+   * In-place mixer snapshot during set performance. AudioParams follow this at
+   * full tick rate; Zustand only gets a throttled copy.
+   */
+  private mixOverlay: SetDoc | null = null;
 
   dispose() {
     this.unsub?.();
     this.unsub = null;
+    this.mixOverlay = null;
     if (this.decks) {
       for (const id of ["A", "B", "C", "D"] as DeckId[]) {
         this.haltSource(id);
@@ -147,7 +159,17 @@ class AudioEngine {
     this.unsub = useSetStore.subscribe((state, prev) => {
       if (state.doc !== prev.doc) {
         if (needsTransportSync(prev.doc, state.doc)) this.requestSync();
-        else this.applyMixerGraph(state.doc);
+        else if (this.mixOverlay && state.lastCommand === prev.lastCommand) {
+          // Performer 20 Hz flush — AudioParams already follow mixOverlay.
+        } else if (this.mixOverlay) {
+          const cmd = state.lastCommand?.command;
+          if (cmd && isMixerVisualCommand(cmd.type)) {
+            adoptMixerCommand(this.mixOverlay, state.doc, cmd);
+          }
+          this.applyMixerGraph(this.mixOverlay);
+        } else {
+          this.applyMixerGraph(state.doc);
+        }
       }
       if (
         state.lastCommand &&
@@ -343,6 +365,25 @@ class AudioEngine {
     for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
       this.applyChannel(deck, doc);
     }
+  }
+
+  /** Mixer snapshot the booth paints from (live overlay while the set runs). */
+  getLiveMixerDoc(): SetDoc {
+    return this.mixOverlay ?? useSetStore.getState().doc;
+  }
+
+  endLiveMix() {
+    this.mixOverlay = null;
+  }
+
+  /**
+   * Automation → AudioParams at full tick rate. Mutates a long-lived overlay;
+   * does not clone the Zustand SetDoc.
+   */
+  applyAutomationFrame(doc: SetDoc, patch: Partial<Record<AutomationParam, number>>) {
+    if (!this.mixOverlay) this.mixOverlay = cloneLiveMixerDoc(doc);
+    applyAutomationInPlace(this.mixOverlay.mixer, this.mixOverlay.fx, this.mixOverlay.decks, patch);
+    this.applyMixerGraph(this.mixOverlay);
   }
 
   getPositionBars(deck: DeckId): number {
@@ -654,17 +695,18 @@ class AudioEngine {
 
     const doc = useSetStore.getState().doc;
     const prevSnap = this.lastDeckSnap;
+    const mixDoc = this.mixOverlay ?? doc;
 
-    this.master.gain.value = Math.pow(10, doc.mixer.masterDb / 20);
+    this.master.gain.value = Math.pow(10, mixDoc.mixer.masterDb / 20);
     this.samplerGain.gain.value = doc.sampler.masterGain;
-    this.applyFx(doc);
+    this.applyFx(mixDoc);
     this.syncRecord(doc);
 
     for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
       const liveDoc = useSetStore.getState().doc;
       const d = liveDoc.decks[deck];
       const nodes = this.decks[deck];
-      this.applyChannel(deck, liveDoc);
+      this.applyChannel(deck, this.mixOverlay ?? liveDoc);
 
       if (nodes.reversing) {
         const d2r = useSetStore.getState().doc.decks[deck];
