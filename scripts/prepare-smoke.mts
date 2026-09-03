@@ -421,12 +421,27 @@ assert(
   teaseLanes.some((l) => l.param === "xfader" && l.startValue === -1 && l.endValue > -1),
   "xfader drifts off the outgoing rail during the tease",
 );
-const teaseSnap = teaseLanes.find(
-  (l) => l.param === "xfader" && l.endValue === 1 && l.startValue < 0,
+// The 1 is a FLICK, not a sweep: the incoming is already at full level and
+// bandwidth a bar early (a sweep through the drop's first hit was the rough
+// switch the user heard).
+assert(
+  teaseLanes.some(
+    (l) => l.param === "fader_b" && l.endValue === 0.75 && l.endBars <= tEnd - 1 + 1e-6,
+  ),
+  "incoming fully open a bar before the 1",
 );
 assert(
-  teaseSnap != null && teaseSnap.endBars - teaseSnap.startBars <= 0.5,
-  "the xfader snap lands on the 1",
+  teaseLanes.some(
+    (l) => l.param === "fader_a" && l.startValue === 0.75 && l.endValue === 0.5 && l.endBars <= tEnd,
+  ),
+  "outgoing dips over the last bar — the kill is a flick, not a squelch",
+);
+const teaseSnap = teaseLanes.find(
+  (l) => l.param === "xfader" && l.endValue === 1 && l.startValue > 0 && l.startValue < 0.6,
+);
+assert(
+  teaseSnap != null && teaseSnap.endBars - teaseSnap.startBars <= 0.1,
+  "the xfader flick lands on the 1 in under a 1/8 bar",
 );
 // The throw: wet fills hard before the cut, then rings out past the leave.
 assert(
@@ -1121,7 +1136,7 @@ assert(!bareGate.ready, "bare ride must not be ready");
 }
 
 // ─── reviewBounce: the agent's ear measures the render, not the narration ───
-const { reviewBounce } = await import("../src/set/reviewSet.ts");
+const { reviewBounce, gainStageLanes } = await import("../src/set/reviewSet.ts");
 {
   const sr = 44100;
   const secPerBar = 2; // linear map: 120bpm 4/4
@@ -1158,6 +1173,9 @@ const { reviewBounce } = await import("../src/set/reviewSet.ts");
   assert(gj.tease_rise != null && gj.tease_rise > 1.05, `tease must rise, got ${gj.tease_rise}`);
   assert(gj.drop_punch != null && gj.drop_punch >= 0.98, `the 1 must lift, got ${gj.drop_punch}`);
   assert(gj.bass_stack != null && gj.bass_stack < 1.5, `one bass at a time, got ${gj.bass_stack}`);
+  assert(gj.first_hit != null && gj.first_hit >= 0.7, `the first hit lands open, got ${gj.first_hit}`);
+  assert(goodReview.entries.length === 2, "per-entry levels measured");
+  assert(goodReview.entries.every((e) => e.level_db != null), "both entries have solo levels");
   assert(goodReview.ready, "clean review is ready");
 
   // Dead air at the commit → broken.
@@ -1177,6 +1195,29 @@ const { reviewBounce } = await import("../src/set/reviewSet.ts");
   assert(
     Math.abs(hotReview.joins[0]!.level_jump_db ?? 0) > 6,
     `jump must be measured, got ${hotReview.joins[0]!.level_jump_db}`,
+  );
+  // Gain staging pulls the hot entry down toward the set mean.
+  const stageLanes = gainStageLanes(revDoc, hotReview);
+  const hotLane = stageLanes.find((l) => l.param === "gain_b");
+  assert(hotLane != null && hotLane.startValue < -2, `hot entry must be pulled down, got ${hotLane?.startValue}`);
+  assert(
+    stageLanes.every((l) => l.id.startsWith("gainstage-")),
+    "gainstage lanes are tagged for wholesale replacement",
+  );
+
+  // Masked first hit: the drop arrives quiet for a beat, then loud → rough.
+  const masked = mkSamples((bar) => ({
+    full: bar >= 32 && bar < 32.5 ? 0.05 : bar >= 32 ? 0.3 : 0.15,
+    mid: 0.05,
+  }));
+  const maskedReview = reviewBounce(revDoc, masked, sr, linearMap);
+  assert(
+    maskedReview.joins[0]!.first_hit != null && maskedReview.joins[0]!.first_hit < 0.7,
+    `masked first hit must be measured, got ${maskedReview.joins[0]!.first_hit}`,
+  );
+  assert(
+    maskedReview.joins[0]!.verdict === "rough",
+    "a slam that ramps through its first hit is rough",
   );
 }
 

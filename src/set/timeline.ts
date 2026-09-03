@@ -365,20 +365,22 @@ export function compileTransitionAutomation(doc: SetDoc): AutomationLane[] {
     const cutAt = Math.max(start, end - 0.25);
 
     if (type === "tease_slam") {
-      // The chop default — a real handoff, not a switch. Three acts over the
-      // overlap: TEASE — the incoming build bleeds in under the outgoing
-      // (LP-filtered, bass killed, fader low, xfader drifting off the rail);
-      // BUILD — the incoming opens while the outgoing HP-rises and the FX
-      // send swells (prepare_set/apply_recipe also lay a tempo lane across
-      // this window; over the last 4 bars the outgoing rides a musical
-      // pitch interval while the incoming stays keylocked. The performer
-      // stutters a 1→0.5 loop roll on the outgoing's last 2 bars);
-      // THE 1 — bass swap, xfader snap, the outgoing dies into an echo throw
-      // whose tail rings over the incoming drop. The composer parks the
-      // incoming at drop−bars so its drop lands exactly on the commit.
+      // The chop default — a real handoff, not a switch. TEASE — the incoming
+      // build bleeds in under the outgoing (LP-filtered, bass killed, fader
+      // low, xfader drifting off the rail). BUILD — the incoming opens to
+      // FULL bandwidth and near-full level a bar early while the outgoing
+      // HP-rises and the FX send swells (prepare_set/apply_recipe also lay a
+      // tempo lane across this window; over the last 4 bars the outgoing
+      // rides a musical pitch interval while the incoming stays keylocked;
+      // the performer stutters a 1→0.5 loop roll on the outgoing's last 2
+      // bars). LAST BAR — the outgoing dips under its roll so the kill is a
+      // flick, not a squelch. THE 1 (1/16 bar) — bass swap + xfader flick;
+      // the drop's first transient lands at full level, not mid-sweep, and
+      // the outgoing dies into an echo throw whose tail rings over the drop.
       const n = end - start;
       const build = Math.max(start, end - Math.min(4, n * 0.5));
-      const killAt = Math.max(build, end - 0.25);
+      const preOpen = Math.max(build, end - 1); // incoming fully open a bar early
+      const flick = Math.max(preOpen, end - 0.0625); // the 1: a 1/16-bar flick
       const inFader = outIsA ? "fader_b" : "fader_a";
       const inMid = outIsA ? "eq_mid_b" : "eq_mid_a";
       const inHigh = outIsA ? "eq_high_b" : "eq_high_a";
@@ -389,27 +391,33 @@ export function compileTransitionAutomation(doc: SetDoc): AutomationLane[] {
       lanes.push(lane(start, build, inFilt, -0.6, -0.3, "ease_in"));
       lanes.push(lane(start, build, inHigh, -8, -3, "linear"));
       lanes.push(lane(start, build, inMid, -10, -6, "linear"));
-      lanes.push(lane(start, killAt, inLow, -24, -24, "linear"));
+      lanes.push(lane(start, flick, inLow, -24, -24, "linear"));
       lanes.push(lane(start, build, "xfader", xfOut, xfOut * 0.45, "ease_in"));
-      // BUILD: incoming opens, outgoing tenses, the throw fills.
-      lanes.push(lane(build, killAt, inFader, 0.38, 0.75, "linear"));
-      lanes.push(lane(build, killAt, inFilt, -0.3, 0, "ease_out"));
-      lanes.push(lane(build, killAt, inHigh, -3, 0, "linear"));
-      lanes.push(lane(build, killAt, inMid, -6, 0, "linear"));
-      lanes.push(lane(build, killAt, "xfader", xfOut * 0.45, xfOut * 0.2, "linear"));
-      lanes.push(lane(build, killAt, outFilt, 0, 0.45, "ease_in"));
-      lanes.push(lane(build, killAt, outHigh, 0, 2, "linear"));
+      // BUILD: incoming reaches full bandwidth and near-full level a bar
+      // early — the drop's first hit must not arrive mid-sweep.
+      lanes.push(lane(build, preOpen, inFader, 0.38, 0.75, "linear"));
+      lanes.push(lane(build, preOpen, inFilt, -0.3, 0, "ease_out"));
+      lanes.push(lane(build, preOpen, inHigh, -3, 0, "linear"));
+      lanes.push(lane(build, preOpen, inMid, -6, -2, "linear"));
+      lanes.push(lane(build, preOpen, "xfader", xfOut * 0.45, xfIn * 0.35, "linear"));
+      // HP rise for tension, not mid massacre: 0.32 ≈ 1.3kHz keeps the
+      // outgoing's mids alive through the build (0.45 gutted them).
+      lanes.push(lane(build, flick, outFilt, 0, 0.32, "ease_in"));
+      lanes.push(lane(build, flick, outHigh, 0, 2, "linear"));
       lanes.push(lane(build, end + 1, "fx_arm", 1, 1, "linear"));
-      lanes.push(lane(build, killAt, "fx_wet", 0.1, 0.5, "ease_in"));
-      // THE 1: bass swap + snap; the outgoing dies into the throw.
-      lanes.push(lane(killAt, end, inLow, -24, 0, "linear"));
-      lanes.push(lane(killAt, end, "xfader", xfOut * 0.2, xfIn, "linear"));
-      lanes.push(lane(killAt, end, outFader, 0.75, 0, "linear"));
-      lanes.push(lane(killAt, end, outLow, 0, -24, "linear"));
-      lanes.push(lane(killAt, end, outMid, 0, -14, "linear"));
-      lanes.push(lane(killAt, end, outHigh, 2, -10, "linear"));
-      lanes.push(lane(killAt, end, outFilt, 0.45, -0.5, "linear"));
-      lanes.push(lane(killAt, end, "fx_wet", 0.5, 0.85, "linear"));
+      lanes.push(lane(build, preOpen, "fx_wet", 0.1, 0.5, "ease_in"));
+      // LAST BAR: the outgoing dips under the roll; the throw keeps filling.
+      lanes.push(lane(preOpen, flick, outFader, 0.75, 0.5, "ease_in"));
+      lanes.push(lane(preOpen, flick, "fx_wet", 0.5, 0.7, "linear"));
+      // THE 1 (1/16 bar): bass swap + xfader flick — the drop lands NOW.
+      lanes.push(lane(flick, end, inLow, -24, 0, "linear"));
+      lanes.push(lane(flick, end, "xfader", xfIn * 0.35, xfIn, "linear"));
+      lanes.push(lane(flick, end, outFader, 0.5, 0, "linear"));
+      lanes.push(lane(flick, end, outLow, 0, -24, "linear"));
+      lanes.push(lane(flick, end, outMid, 0, -14, "linear"));
+      lanes.push(lane(flick, end, outHigh, 2, -10, "linear"));
+      lanes.push(lane(flick, end, outFilt, 0.32, -0.5, "linear"));
+      lanes.push(lane(flick, end, "fx_wet", 0.7, 0.85, "linear"));
       // Tail: the delay buffer rings over the incoming drop, then releases.
       lanes.push(lane(end, end + 1, "fx_wet", 0.85, 0, "ease_out"));
       lanes.push(lane(end + 1, end + 1.01, "fx_arm", 1, 0, "linear"));
