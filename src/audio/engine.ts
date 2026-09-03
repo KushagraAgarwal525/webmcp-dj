@@ -1,12 +1,23 @@
 import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import processorUrl from "@soundtouchjs/audio-worklet/processor?url";
-import type { DeckId, SetDoc } from "../types/setdoc";
+import type { AutomationParam, DeckId, SetDoc } from "../types/setdoc";
 import { useSetStore } from "../commands/pipeline";
 import { getAudioBuffer } from "./bufferCache";
-import { BACKSPIN_REWIND_BARS } from "../set/timeline";
+import { allAutomation, BACKSPIN_REWIND_BARS } from "../set/timeline";
 import { reversedSlice } from "./reverseSlice";
+import {
+  adoptMixerCommand,
+  applyAutomationInPlace,
+  cloneLiveMixerDoc,
+  isMixerVisualCommand,
+} from "./liveMixer";
 
 type FilterMode = "allpass" | "lowpass" | "highpass";
+
+/** |tempoRatio-1| below this is dry keylock (identity stretch is wasted WSOLA). */
+const STRETCH_IDENTITY = 1e-4;
+/** Arm stretch on a new source this many bars before a tempo lane so the ride doesn't click in. */
+const STRETCH_LANE_LOOKAHEAD_BARS = 8;
 
 type DeckNodes = {
   gain: GainNode;
@@ -19,14 +30,17 @@ type DeckNodes = {
   buffer: AudioBuffer | null;
   loadedTrackId: string | null;
   source: AudioBufferSourceNode | null;
-  /** Keylock pitch-compensator (null when keylock off) */
+  /** Persistent keylock worklet — created once, reconnected; never rebuilt per seek/loop. */
   stretch: SoundTouchNode | null;
+  stretchConnected: boolean;
   startedAt: number;
   offsetSec: number;
   playing: boolean;
   rate: number;
   nativeBpm: number;
   useStretch: boolean;
+  loopStartSec: number | null;
+  loopEndSec: number | null;
   analyser: AnalyserNode;
   levelBuf: Uint8Array<ArrayBuffer>;
   /** Vinyl rewind: a reversed slice is playing; skip forward seeks / rate writes. */
@@ -49,8 +63,6 @@ class AudioEngine {
   private recordChunks: Blob[] = [];
   private decks: Record<DeckId, DeckNodes> | null = null;
   private unsub: (() => void) | null = null;
-  private loopRaf = 0;
-  private loopWatchOn = false;
   private syncRunning = false;
   private syncQueued = false;
   private workletReady = false;
@@ -61,11 +73,21 @@ class AudioEngine {
   private wasRecording = false;
   /** Last values pushed to each channel's AudioParams — dezipper + skip identical frames. */
   private appliedCh: Partial<Record<DeckId, Record<string, number>>> = {};
+  /**
+   * In-place mixer snapshot during set performance. AudioParams follow this at
+   * full tick rate; Zustand only gets a throttled copy.
+   */
+  private mixOverlay: SetDoc | null = null;
 
   dispose() {
-    this.disarmLoopWatch();
     this.unsub?.();
     this.unsub = null;
+    this.mixOverlay = null;
+    if (this.decks) {
+      for (const id of ["A", "B", "C", "D"] as DeckId[]) {
+        this.haltSource(id);
+      }
+    }
     void this.ctx?.close();
     this.ctx = null;
   }
@@ -126,6 +148,9 @@ class AudioEngine {
     try {
       await SoundTouchNode.register(ctx, processorUrl);
       this.workletReady = true;
+      // Warm A/B once so the first keylock ride doesn't compile a worklet mid-set.
+      this.ensureStretch(this.decks.A);
+      this.ensureStretch(this.decks.B);
     } catch (e) {
       console.warn("[audio] SoundTouch worklet unavailable; keylock falls back to rate", e);
       this.workletReady = false;
@@ -134,7 +159,17 @@ class AudioEngine {
     this.unsub = useSetStore.subscribe((state, prev) => {
       if (state.doc !== prev.doc) {
         if (needsTransportSync(prev.doc, state.doc)) this.requestSync();
-        else this.applyMixerGraph(state.doc);
+        else if (this.mixOverlay && state.lastCommand === prev.lastCommand) {
+          // Performer 20 Hz flush — AudioParams already follow mixOverlay.
+        } else if (this.mixOverlay) {
+          const cmd = state.lastCommand?.command;
+          if (cmd && isMixerVisualCommand(cmd.type)) {
+            adoptMixerCommand(this.mixOverlay, state.doc, cmd);
+          }
+          this.applyMixerGraph(this.mixOverlay);
+        } else {
+          this.applyMixerGraph(state.doc);
+        }
       }
       if (
         state.lastCommand &&
@@ -164,8 +199,8 @@ class AudioEngine {
   }
 
   /**
-   * Play a reversed PCM slice once (no SoundTouch). Restarting the keylock
-   * worklet every frame is silent; this is actual rewind audio.
+   * Play a reversed PCM slice once (no SoundTouch). The persistent keylock
+   * node stays allocated but disconnected; rewind audio is the dry slice.
    */
   startReverse(
     deck: DeckId,
@@ -200,8 +235,9 @@ class AudioEngine {
     src.start(0);
 
     nodes.source = src;
-    nodes.stretch = null;
     nodes.useStretch = false;
+    nodes.loopStartSec = null;
+    nodes.loopEndSec = null;
     nodes.reversing = true;
     nodes.playing = true;
     nodes.rate = fromRate;
@@ -215,10 +251,12 @@ class AudioEngine {
       };
     }
     src.onended = () => {
-      if (nodes.source === src) {
-        nodes.playing = false;
-        nodes.source = null;
-      }
+      if (nodes.source !== src) return;
+      nodes.playing = false;
+      nodes.source = null;
+      nodes.loopStartSec = null;
+      nodes.loopEndSec = null;
+      nodes.reversing = false;
     };
   }
 
@@ -304,12 +342,15 @@ class AudioEngine {
       loadedTrackId: null,
       source: null,
       stretch: null,
+      stretchConnected: false,
       startedAt: 0,
       offsetSec: 0,
       playing: false,
       rate: 1,
       nativeBpm: 120,
       useStretch: false,
+      loopStartSec: null,
+      loopEndSec: null,
       analyser,
       levelBuf: new Uint8Array(new ArrayBuffer(analyser.fftSize)),
       reversing: false,
@@ -326,67 +367,151 @@ class AudioEngine {
     }
   }
 
-  private armLoopWatch() {
-    if (this.loopWatchOn) return;
-    this.loopWatchOn = true;
-    const tick = () => {
-      if (!this.loopWatchOn) return;
-      this.checkLoops();
-      this.loopRaf = requestAnimationFrame(tick);
-    };
-    this.loopRaf = requestAnimationFrame(tick);
+  /** Mixer snapshot the booth paints from (live overlay while the set runs). */
+  getLiveMixerDoc(): SetDoc {
+    return this.mixOverlay ?? useSetStore.getState().doc;
   }
 
-  private disarmLoopWatch() {
-    this.loopWatchOn = false;
-    cancelAnimationFrame(this.loopRaf);
-    this.loopRaf = 0;
+  endLiveMix() {
+    this.mixOverlay = null;
   }
 
-  private syncLoopWatch(doc: SetDoc) {
-    const need = (["A", "B", "C", "D"] as DeckId[]).some((id) => {
-      const d = doc.decks[id];
-      return d.playing && d.loopBars != null && d.loopInBars != null;
-    });
-    if (need) this.armLoopWatch();
-    else this.disarmLoopWatch();
-  }
-
-  private checkLoops() {
-    if (!this.decks) return;
-    const doc = useSetStore.getState().doc;
-    for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
-      const d = doc.decks[deck];
-      const nodes = this.decks[deck];
-      if (
-        !d.playing ||
-        d.loopBars == null ||
-        d.loopInBars == null ||
-        !nodes.playing ||
-        nodes.reversing
-      ) {
-        continue;
-      }
-      const pos = this.getPositionBars(deck);
-      const end = d.loopInBars + d.loopBars;
-      if (pos >= end - 0.02) {
-        this.seekPlaying(deck, d.loopInBars, d);
-      }
-    }
+  /**
+   * Automation → AudioParams at full tick rate. Mutates a long-lived overlay;
+   * does not clone the Zustand SetDoc.
+   */
+  applyAutomationFrame(doc: SetDoc, patch: Partial<Record<AutomationParam, number>>) {
+    if (!this.mixOverlay) this.mixOverlay = cloneLiveMixerDoc(doc);
+    applyAutomationInPlace(this.mixOverlay.mixer, this.mixOverlay.fx, this.mixOverlay.decks, patch);
+    this.applyMixerGraph(this.mixOverlay);
   }
 
   getPositionBars(deck: DeckId): number {
     if (!this.ctx || !this.decks) return 0;
     const nodes = this.decks[deck];
     const barSec = (60 / Math.max(1, nodes.nativeBpm)) * 4;
-    let sec = nodes.offsetSec;
-    if (nodes.playing) {
-      sec += (this.ctx.currentTime - nodes.startedAt) * nodes.rate;
-    }
+    let sec = this.bufferSec(nodes);
     if (nodes.buffer) {
       sec = Math.min(Math.max(0, sec), Math.max(0, nodes.buffer.duration - 0.01));
     }
     return sec / barSec;
+  }
+
+  /** Buffer-time playhead, wrapping inside an armed native loop. */
+  private bufferSec(nodes: DeckNodes): number {
+    let sec = nodes.offsetSec;
+    if (nodes.playing && this.ctx) {
+      sec += (this.ctx.currentTime - nodes.startedAt) * nodes.rate;
+    }
+    if (nodes.loopStartSec != null && nodes.loopEndSec != null) {
+      sec = wrapLoopSec(sec, nodes.loopStartSec, nodes.loopEndSec);
+    }
+    return sec;
+  }
+
+  private ensureStretch(nodes: DeckNodes): SoundTouchNode | null {
+    if (!this.workletReady || !this.ctx) return null;
+    if (!nodes.stretch) {
+      const st = new SoundTouchNode({ context: this.ctx });
+      st.pitch.value = 1;
+      nodes.stretch = st;
+      nodes.stretchConnected = false;
+    }
+    return nodes.stretch;
+  }
+
+  private attachStretch(nodes: DeckNodes) {
+    if (!nodes.stretch || nodes.stretchConnected) return;
+    nodes.stretch.connect(nodes.eqLow);
+    nodes.stretchConnected = true;
+  }
+
+  private detachStretch(nodes: DeckNodes) {
+    if (!nodes.stretch || !nodes.stretchConnected) return;
+    try {
+      nodes.stretch.disconnect();
+    } catch {
+      /* */
+    }
+    nodes.stretchConnected = false;
+  }
+
+  /** Snapshot elapsed buffer time before changing rate so the estimator stays honest. */
+  private setDeckRate(nodes: DeckNodes, tempoRatio: number) {
+    const rate = Math.max(0.05, tempoRatio);
+    if (nodes.playing && this.ctx && Math.abs(rate - nodes.rate) > 1e-6) {
+      nodes.offsetSec += (this.ctx.currentTime - nodes.startedAt) * nodes.rate;
+      nodes.startedAt = this.ctx.currentTime;
+    }
+    nodes.rate = rate;
+    if (nodes.source) nodes.source.playbackRate.value = rate;
+    if (nodes.useStretch && nodes.stretch) {
+      nodes.stretch.playbackRate.value = rate;
+      nodes.stretch.pitch.value = 1;
+    }
+  }
+
+  private tempoLaneSoon(doc: SetDoc): boolean {
+    const { setPlaying, setPositionBars } = useSetStore.getState().transport;
+    if (!setPlaying) return false;
+    const look = setPositionBars + STRETCH_LANE_LOOKAHEAD_BARS;
+    for (const l of allAutomation(doc)) {
+      if (l.param !== "tempo") continue;
+      if (l.endBars < setPositionBars) continue;
+      if (l.startBars <= look) return true;
+    }
+    return false;
+  }
+
+  private stretchWanted(
+    keylock: boolean,
+    tempoRatio: number,
+    playingStretch: boolean,
+    starting: boolean,
+    doc: SetDoc,
+  ): boolean {
+    if (!keylock || !this.workletReady) return false;
+    if (playingStretch) return true;
+    if (Math.abs(tempoRatio - 1) > STRETCH_IDENTITY) return true;
+    return starting && this.tempoLaneSoon(doc);
+  }
+
+  /**
+   * Native AudioBufferSourceNode loop — same window as the offline bounce.
+   * Changing in/length updates the live source; no graph rebuild on wrap.
+   */
+  private applyLiveLoop(deck: DeckId, d: SetDoc["decks"][DeckId], nodes: DeckNodes) {
+    if (!nodes.source || !nodes.buffer || nodes.reversing) return;
+    if (d.loopBars == null || d.loopInBars == null) {
+      nodes.source.loop = false;
+      nodes.loopStartSec = null;
+      nodes.loopEndSec = null;
+      return;
+    }
+    const raw =
+      nodes.offsetSec +
+      (nodes.playing && this.ctx
+        ? (this.ctx.currentTime - nodes.startedAt) * nodes.rate
+        : 0);
+    const prevStart = nodes.loopStartSec;
+    const prevEnd = nodes.loopEndSec;
+    const playhead =
+      prevStart != null && prevEnd != null ? wrapLoopSec(raw, prevStart, prevEnd) : raw;
+    const win = loopWindowSec(nodes.buffer, nodes.nativeBpm, d.loopInBars, d.loopBars);
+    nodes.source.loop = true;
+    nodes.source.loopStart = win.start;
+    nodes.source.loopEnd = win.end;
+    nodes.loopStartSec = win.start;
+    nodes.loopEndSec = win.end;
+    const windowChanged =
+      prevStart == null ||
+      prevEnd == null ||
+      Math.abs(prevStart - win.start) > 1e-4 ||
+      Math.abs(prevEnd - win.end) > 1e-4;
+    // Only restart when the window itself moved (loop roll shrink). Native wrap handles the rest.
+    if (windowChanged && playhead >= win.end - 0.02) {
+      this.seekPlaying(deck, d.loopInBars, d);
+    }
   }
 
   isBufferReady(deck: DeckId): boolean {
@@ -570,17 +695,18 @@ class AudioEngine {
 
     const doc = useSetStore.getState().doc;
     const prevSnap = this.lastDeckSnap;
+    const mixDoc = this.mixOverlay ?? doc;
 
-    this.master.gain.value = Math.pow(10, doc.mixer.masterDb / 20);
+    this.master.gain.value = Math.pow(10, mixDoc.mixer.masterDb / 20);
     this.samplerGain.gain.value = doc.sampler.masterGain;
-    this.applyFx(doc);
+    this.applyFx(mixDoc);
     this.syncRecord(doc);
 
     for (const deck of ["A", "B", "C", "D"] as DeckId[]) {
       const liveDoc = useSetStore.getState().doc;
       const d = liveDoc.decks[deck];
       const nodes = this.decks[deck];
-      this.applyChannel(deck, liveDoc);
+      this.applyChannel(deck, this.mixOverlay ?? liveDoc);
 
       if (nodes.reversing) {
         const d2r = useSetStore.getState().doc.decks[deck];
@@ -611,16 +737,16 @@ class AudioEngine {
       nodes.nativeBpm = nativeBpm2;
       const targetBpm2 = d2.bpm ?? nativeBpm2;
       const tempoRatio2 = targetBpm2 / Math.max(1e-6, nativeBpm2);
-      // Pitch-lock only when keylock (worklet). Performer sync sets BPM; rate follows.
-      const wantStretch2 = d2.keylock && this.workletReady;
+      const wantStretch2 = this.stretchWanted(
+        d2.keylock,
+        tempoRatio2,
+        nodes.useStretch && nodes.playing,
+        !nodes.playing,
+        useSetStore.getState().doc,
+      );
 
       if (nodes.source && nodes.playing) {
-        nodes.rate = tempoRatio2;
-        nodes.source.playbackRate.value = tempoRatio2;
-        if (nodes.stretch) {
-          nodes.stretch.playbackRate.value = tempoRatio2;
-          nodes.stretch.pitch.value = 1;
-        }
+        this.setDeckRate(nodes, tempoRatio2);
       }
 
       const prev = prevSnap?.[deck];
@@ -641,6 +767,10 @@ class AudioEngine {
         this.stopDeck(deck);
         this.startDeck(deck, pos, nativeBpm2, tempoRatio2, wantStretch2);
       }
+
+      if (nodes.playing && !nodes.reversing) {
+        this.applyLiveLoop(deck, useSetStore.getState().doc.decks[deck], nodes);
+      }
     }
 
     const finalDoc = useSetStore.getState().doc;
@@ -650,7 +780,6 @@ class AudioEngine {
       C: snapDeck(finalDoc, "C"),
       D: snapDeck(finalDoc, "D"),
     };
-    this.syncLoopWatch(finalDoc);
   }
 
   private syncRecord(doc: SetDoc) {
@@ -668,8 +797,14 @@ class AudioEngine {
     const nativeBpm = nodes.nativeBpm;
     const targetBpm = d.bpm ?? nativeBpm;
     const tempoRatio = targetBpm / Math.max(1e-6, nativeBpm);
-    const wantStretch = d.keylock && this.workletReady;
-    this.stopDeck(deck);
+    const wantStretch = this.stretchWanted(
+      d.keylock,
+      tempoRatio,
+      nodes.useStretch && nodes.playing,
+      true,
+      useSetStore.getState().doc,
+    );
+    this.stopDeck(deck, false, nodes.useStretch && wantStretch);
     this.startDeck(deck, positionBars, nativeBpm, tempoRatio, wantStretch);
     if (this.lastDeckSnap) {
       this.lastDeckSnap[deck] = {
@@ -690,28 +825,50 @@ class AudioEngine {
     if (!this.ctx || !this.decks) return;
     const nodes = this.decks[deck];
     if (!nodes.buffer) return;
-    const barSec = (60 / bpm) * 4;
-    const offset = Math.max(
+    const barSec = (60 / Math.max(1, bpm)) * 4;
+    let offset = Math.max(
       0,
       Math.min(nodes.buffer.duration - 0.05, positionBars * barSec),
     );
     const rate = Math.max(0.05, tempoRatio);
+    const live = useSetStore.getState().doc.decks[deck];
+    let loopWin: { start: number; end: number } | null = null;
+    if (live.loopBars != null && live.loopInBars != null) {
+      loopWin = loopWindowSec(nodes.buffer, bpm, live.loopInBars, live.loopBars);
+      if (offset >= loopWin.end) offset = loopWin.start;
+    }
 
     const src = this.ctx.createBufferSource();
     src.buffer = nodes.buffer;
     src.playbackRate.value = rate;
+    if (loopWin) {
+      src.loop = true;
+      src.loopStart = loopWin.start;
+      src.loopEnd = loopWin.end;
+      nodes.loopStartSec = loopWin.start;
+      nodes.loopEndSec = loopWin.end;
+    } else {
+      src.loop = false;
+      nodes.loopStartSec = null;
+      nodes.loopEndSec = null;
+    }
 
     if (stretch && this.workletReady) {
-      const st = new SoundTouchNode({ context: this.ctx });
-      st.playbackRate.value = rate;
-      st.pitch.value = 1;
-      src.connect(st);
-      st.connect(nodes.eqLow);
-      nodes.stretch = st;
-      nodes.useStretch = true;
+      const st = this.ensureStretch(nodes);
+      if (st) {
+        st.playbackRate.value = rate;
+        st.pitch.value = 1;
+        src.connect(st);
+        this.attachStretch(nodes);
+        nodes.useStretch = true;
+      } else {
+        src.connect(nodes.eqLow);
+        this.detachStretch(nodes);
+        nodes.useStretch = false;
+      }
     } else {
       src.connect(nodes.eqLow);
-      nodes.stretch = null;
+      this.detachStretch(nodes);
       nodes.useStretch = false;
     }
 
@@ -726,14 +883,10 @@ class AudioEngine {
       if (nodes.source === src) {
         nodes.playing = false;
         nodes.source = null;
-        if (nodes.stretch) {
-          try {
-            nodes.stretch.disconnect();
-          } catch {
-            /* */
-          }
-          nodes.stretch = null;
-        }
+        nodes.loopStartSec = null;
+        nodes.loopEndSec = null;
+        this.detachStretch(nodes);
+        nodes.useStretch = false;
         if (!useSetStore.getState().transport.setPlaying) {
           useSetStore.getState().dispatch({ type: "deck.pause", deck }, "system");
         }
@@ -741,39 +894,37 @@ class AudioEngine {
     };
   }
 
-  private haltSource(deck: DeckId, rememberOffset = false) {
+  private haltSource(deck: DeckId, rememberOffset = false, keepStretch = false) {
     if (!this.ctx || !this.decks) return;
     const nodes = this.decks[deck];
     if (rememberOffset && nodes.playing) {
-      nodes.offsetSec += (this.ctx.currentTime - nodes.startedAt) * nodes.rate;
+      nodes.offsetSec = this.bufferSec(nodes);
     }
-    if (nodes.source) {
-      try {
-        nodes.source.stop();
-      } catch {
-        /* */
-      }
-      try {
-        nodes.source.disconnect();
-      } catch {
-        /* */
-      }
-      nodes.source = null;
-    }
-    if (nodes.stretch) {
-      try {
-        nodes.stretch.disconnect();
-      } catch {
-        /* */
-      }
-      nodes.stretch = null;
-    }
+    const src = nodes.source;
+    nodes.source = null;
     nodes.playing = false;
-    nodes.useStretch = false;
+    if (!keepStretch) {
+      this.detachStretch(nodes);
+      nodes.useStretch = false;
+    }
+    nodes.loopStartSec = null;
+    nodes.loopEndSec = null;
+    if (src) {
+      try {
+        src.stop();
+      } catch {
+        /* */
+      }
+      try {
+        src.disconnect();
+      } catch {
+        /* */
+      }
+    }
   }
 
-  private stopDeck(deck: DeckId, rememberOffset = false) {
-    this.haltSource(deck, rememberOffset);
+  private stopDeck(deck: DeckId, rememberOffset = false, keepStretch = false) {
+    this.haltSource(deck, rememberOffset, keepStretch);
     if (this.decks) this.decks[deck].reversing = false;
   }
 
@@ -842,6 +993,29 @@ class AudioEngine {
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
+}
+
+function loopWindowSec(
+  buffer: AudioBuffer,
+  nativeBpm: number,
+  loopInBars: number,
+  loopBars: number,
+): { start: number; end: number } {
+  const nativeBar = (60 / Math.max(1, nativeBpm)) * 4;
+  const start = Math.max(0, Math.min(buffer.duration - 0.02, loopInBars * nativeBar));
+  const end = Math.max(
+    start + 0.03,
+    Math.min(buffer.duration, (loopInBars + loopBars) * nativeBar),
+  );
+  return { start, end };
+}
+
+/** First pass can lead in before loopStart; after loopEnd wrap into [start, end). */
+function wrapLoopSec(sec: number, start: number, end: number): number {
+  if (sec < end) return sec;
+  const span = end - start;
+  if (span < 0.03) return sec;
+  return start + ((sec - end) % span);
 }
 
 function needsTransportSync(prev: SetDoc, next: SetDoc): boolean {

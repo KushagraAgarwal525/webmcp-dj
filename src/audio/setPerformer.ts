@@ -1,6 +1,6 @@
 import { audioEngine } from "./engine";
 import { useSetStore } from "../commands/pipeline";
-import type { AutomationParam, ChannelState, DeckId, SetDoc } from "../types/setdoc";
+import type { AutomationParam, DeckId, SetDoc } from "../types/setdoc";
 import {
   allAutomation,
   backspinPlayheadBars,
@@ -18,6 +18,7 @@ import {
 } from "../set/timeline";
 import { getAudioBuffer, peekAudioBuffer } from "./bufferCache";
 import { captureSetPlay } from "../analytics/tools";
+import { applyAutomationToDoc } from "./liveMixer";
 
 type ActiveSlot = {
   entryIndex: number;
@@ -36,6 +37,8 @@ class SetPerformer {
   private lastDriftSeekMs: Partial<Record<"A" | "B", number>> = {};
   private lastUiTransportMs = 0;
   private lastAutoKey = "";
+  private lastAutoPatch: Partial<Record<AutomationParam, number>> | null = null;
+  private lastMixerFlushMs = 0;
   private suppressDriftUntil = 0;
   private hiddenTimer: ReturnType<typeof setInterval> | undefined;
   private visibilityWatch = false;
@@ -122,6 +125,7 @@ class SetPerformer {
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
       await this.runSyncDecks(true);
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
+      this.flushAutomationDoc(true);
 
       this.attachVisibility();
       this.lastCtxTime = audioEngine.getCurrentTime();
@@ -140,6 +144,8 @@ class SetPerformer {
     this.raf = 0;
     this.clearHiddenTimer();
     this.syncNeeded = false;
+    this.flushAutomationDoc(true);
+    audioEngine.endLiveMix();
     audioEngine.setPerformerSync(false);
     useSetStore.getState().setTransport({ setPlaying: false });
     for (const deck of ["A", "B"] as const) {
@@ -222,6 +228,7 @@ class SetPerformer {
     await this.waitForSyncIdle();
     await this.runSyncDecks(this.isPlaying());
     this.applyAutomation(useSetStore.getState().doc, this.positionBars);
+    this.flushAutomationDoc(true);
     this.lastCtxTime = audioEngine.getCurrentTime();
     // Keep UI playheads in sync immediately after ruler seek.
     this.updatePlayheads(useSetStore.getState().doc);
@@ -412,78 +419,19 @@ class SetPerformer {
       .join("|");
     if (key === this.lastAutoKey) return;
     this.lastAutoKey = key;
+    this.lastAutoPatch = patch;
 
-    useSetStore.getState().patchLive((d) => {
-      let next = d;
-      const mixer = { ...next.mixer, channels: { ...next.mixer.channels } };
-      let dirty = false;
+    audioEngine.applyAutomationFrame(doc, patch);
+    this.flushAutomationDoc(false);
+  }
 
-      const setCh = (deck: DeckId, key: keyof ChannelState, value: number) => {
-        mixer.channels[deck] = { ...mixer.channels[deck], [key]: value };
-        dirty = true;
-      };
-
-      if (patch.xfader != null) {
-        mixer.crossfader = clamp(patch.xfader, -1, 1);
-        dirty = true;
-      }
-      if (patch.filter_a != null) setCh("A", "filter", clamp(patch.filter_a, -1, 1));
-      if (patch.filter_b != null) setCh("B", "filter", clamp(patch.filter_b, -1, 1));
-      if (patch.eq_low_a != null) setCh("A", "eqLow", patch.eq_low_a);
-      if (patch.eq_mid_a != null) setCh("A", "eqMid", patch.eq_mid_a);
-      if (patch.eq_high_a != null) setCh("A", "eqHigh", patch.eq_high_a);
-      if (patch.eq_low_b != null) setCh("B", "eqLow", patch.eq_low_b);
-      if (patch.eq_mid_b != null) setCh("B", "eqMid", patch.eq_mid_b);
-      if (patch.eq_high_b != null) setCh("B", "eqHigh", patch.eq_high_b);
-      if (patch.fader_a != null) setCh("A", "fader", clamp(patch.fader_a, 0, 1));
-      if (patch.fader_b != null) setCh("B", "fader", clamp(patch.fader_b, 0, 1));
-      if (patch.gain_a != null) setCh("A", "gainDb", patch.gain_a);
-      if (patch.gain_b != null) setCh("B", "gainDb", patch.gain_b);
-
-      if (dirty) next = { ...next, mixer };
-
-      if (patch.fx_wet != null || patch.fx_arm != null) {
-        const arm = patch.fx_arm ?? (patch.fx_wet != null && patch.fx_wet > 0.05 ? 1 : 0);
-        const wet =
-          patch.fx_wet != null ? clamp(patch.fx_wet, 0, 1) : next.fx.wet;
-        next = {
-          ...next,
-          fx: {
-            ...next.fx,
-            wet,
-            type:
-              arm > 0.5 || wet > 0.03
-                ? "delay"
-                : next.fx.type === "delay"
-                  ? "off"
-                  : next.fx.type,
-            timeBeats: arm > 0.5 ? Math.max(next.fx.timeBeats, 0.75) : next.fx.timeBeats,
-            feedback: arm > 0.5 ? Math.max(next.fx.feedback, 0.4) : next.fx.feedback,
-          },
-        };
-        const decks = { ...next.decks };
-        const xf = mixer.crossfader;
-        // Only the leave deck feeds the send — never both, never the incoming record.
-        if (arm > 0.5) {
-          const aFader = mixer.channels.A.fader;
-          const bFader = mixer.channels.B.fader;
-          decks.A = {
-            ...decks.A,
-            fxSend: xf <= 0 && aFader > 0.02 ? 0.55 : 0,
-          };
-          decks.B = {
-            ...decks.B,
-            fxSend: xf >= 0 && bFader > 0.02 ? 0.55 : 0,
-          };
-        } else {
-          decks.A = { ...decks.A, fxSend: 0 };
-          decks.B = { ...decks.B, fxSend: 0 };
-        }
-        next = { ...next, decks };
-      }
-
-      return next;
-    });
+  private flushAutomationDoc(force: boolean) {
+    const patch = this.lastAutoPatch;
+    if (!patch) return;
+    const now = performance.now();
+    if (!force && now - this.lastMixerFlushMs < 50) return;
+    this.lastMixerFlushMs = now;
+    useSetStore.getState().patchLive((d) => applyAutomationToDoc(d, patch));
   }
 
   private clockBpm(doc: SetDoc, setBars: number): number {
@@ -767,10 +715,6 @@ function isBackspinDeck(doc: SetDoc, setBars: number, deck: DeckId): boolean {
     if (setBars >= start && setBars < end) return true;
   }
   return false;
-}
-
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
 }
 
 function resetMixerForSet(doc: SetDoc): SetDoc {

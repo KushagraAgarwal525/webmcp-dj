@@ -273,7 +273,11 @@ function DeckJog({
   empty: boolean;
   title?: string;
 }) {
-  const playheadBars = useDeckPlayhead(deck);
+  const playheadBars = useSetStore((s) => {
+    const d = s.doc.decks[deck];
+    if (s.transport.setPlaying || d.playing) return 0;
+    return s.transport.deckPlayheads[deck] ?? d.positionBars;
+  });
   return (
     <JogWheel
       deck={deck}
