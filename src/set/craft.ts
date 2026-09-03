@@ -955,7 +955,7 @@ function chooseJoinBlend(outgoing: Track, incoming: Track): JoinPick {
     return {
       recipe: "tempo_ride",
       bars: 16,
-      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks across a 16-bar isolator (outgoing rides keylock-off), commit on the incoming drop at ${inDrop}.`,
+      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks across a 16-bar isolator (outgoing rides a musical pitch interval, keylock stays on), commit on the incoming drop at ${inDrop}.`,
     };
   }
 
@@ -1244,14 +1244,16 @@ export function joinCompileReport(doc: SetDoc, index: number): JoinCompileReport
   const isEcho = span.entry.transition.type === "echo_out";
   // Hold lanes (xfOut→xfOut) park the fader; the swap lane is the audible
   // commit. Tease/drift lanes move the xfader OFF the outgoing rail long
-  // before the slam — the commit is the lane that lands on the INCOMING side.
-  // The endcap keeps the NEXT join's drift lanes (which start at this join's
-  // boundary) out of this join's commit.
+  // before the slam — the commit is the lane that lands on the INCOMING side
+  // AND completes at the join's end (a drift that crosses mid-window is the
+  // approach, not the slam). The endcap keeps the NEXT join's drift lanes
+  // (which start at this join's boundary) out of this join's commit.
   const xfIn = prev.deck === "A" ? 1 : -1;
   const xfLanes = lanes.filter(
     (l) =>
       l.param === "xfader" &&
       l.startBars >= start - 1e-6 &&
+      l.endBars >= end - 0.1 &&
       l.endBars <= windowEnd + 0.5 &&
       Math.abs(l.startValue - l.endValue) > 0.5 &&
       l.endValue !== 0 &&

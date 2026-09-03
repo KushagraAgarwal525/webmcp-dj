@@ -43,7 +43,7 @@ import {
 } from "../set/craft";
 import { crateCard, crateCards, prepareSet } from "../set/prepareSet";
 import { previewJoin } from "../set/previewJoin";
-import { reviewBounce } from "../set/reviewSet";
+import { gainStageLanes, reviewBounce } from "../set/reviewSet";
 import { setPerformer } from "../audio/setPerformer";
 import { assertToolMapped } from "./toolUiMap";
 import { findLyricMatches } from "../lyrics/lrclib";
@@ -77,6 +77,42 @@ function monoMix(buffer: AudioBuffer): Float32Array {
   const out = new Float32Array(l.length);
   for (let i = 0; i < l.length; i++) out[i] = ((l[i] ?? 0) + (r[i] ?? 0)) * 0.5;
   return out;
+}
+
+/** Bounce the current doc and measure it — the agent's ear. */
+async function bounceAndReview(doc: SetDoc) {
+  const { renderSetToBuffer } = await import("../audio/renderSet");
+  useSetStore.getState().setActivity("Bouncing for review…");
+  const { buffer, barsToSec } = await renderSetToBuffer(doc, (p, label) => {
+    useSetStore.getState().setActivity(`Review: ${label} ${Math.round(p * 100)}%`);
+  });
+  const review = reviewBounce(doc, monoMix(buffer), buffer.sampleRate, barsToSec);
+  useSetStore
+    .getState()
+    .setActivity(`Review: ${review.clean} clean · ${review.rough} rough · ${review.broken} broken`);
+  return review;
+}
+
+/** Write/replace gainstage lanes from a review's per-entry solo levels. */
+function applyGainStage(review: ReturnType<typeof reviewBounce>) {
+  const lanes = gainStageLanes(getDoc(), review);
+  for (const l of getDoc().automation.filter((x) => x.id.startsWith("gainstage-"))) {
+    dispatch({ type: "set.removeAutomation", id: l.id });
+  }
+  const deltas: { entry: number; db: number }[] = [];
+  for (const l of lanes) {
+    dispatch({ type: "set.addAutomation", lane: l });
+    if (l.startValue !== 0) {
+      deltas.push({ entry: Number(l.id.split("-")[1]), db: l.startValue });
+    }
+  }
+  return {
+    lanes: lanes.length,
+    deltas,
+    note: deltas.length
+      ? "gain lanes written — re-run review_set to confirm the jumps closed"
+      : "levels already even — no lanes needed",
+  };
 }
 
 function deckId(value: unknown): DeckId | null {
@@ -1715,56 +1751,41 @@ export function buildCoreTools() {
     name: "review_set",
     title: "Review set (bounce + measure)",
     description:
-      "Bounce the arrangement offline and MEASURE each join from the rendered audio: dead air at the commit, level jump across the 1, bass stacking during the tease, whether the tease rises, whether the slam lifts. Trust these numbers over imagination — what fails here fails in the room. Loop rolls and tempo rides render like live. Run after prepare_set / apply_transition_recipe, fix rough/broken joins, re-run. Pass index to focus one join.",
+      "Bounce the arrangement offline and MEASURE each join from the rendered audio: dead air at the commit, level jump across the 1, bass stacking during the tease, whether the tease rises, whether the drop's FIRST hit lands open (first_hit < 0.7 = the slam ramps through the 1), whether the slam lifts. Trust these numbers over imagination — what fails here fails in the room. Loop rolls and tempo rides render like live. Run after prepare_set / apply_transition_recipe. With fix:true, writes gainstage lanes that level every entry's solo loudness to the set mean (kills hot/sagging slams) — then re-run to confirm. Pass index to focus one join.",
     inputSchema: {
       type: "object",
       properties: {
         index: { type: "number", description: "Optional join index (≥1) to focus" },
+        fix: { type: "boolean", description: "Write gain-staging lanes from the measurements" },
       },
       additionalProperties: false,
     },
     execute: async (input) => {
       const doc = getDoc();
       if (doc.arrangement.length < 2) throw new Error("need a set (2+ entries) to review");
-      const { renderSetToBuffer } = await import("../audio/renderSet");
-      useSetStore.getState().setActivity("Bouncing for review…");
-      const { buffer, barsToSec } = await renderSetToBuffer(doc, (p, label) => {
-        useSetStore.getState().setActivity(`Review: ${label} ${Math.round(p * 100)}%`);
-      });
-      const mono = monoMix(buffer);
-      const review = reviewBounce(doc, mono, buffer.sampleRate, barsToSec);
+      const review = await bounceAndReview(doc);
+      const fixed = input.fix === true ? applyGainStage(review) : null;
       const idx = input.index != null ? Number(input.index) : null;
-      useSetStore
-        .getState()
-        .setActivity(`Review: ${review.clean} clean · ${review.rough} rough · ${review.broken} broken`);
       if (idx != null) {
         const join = review.joins.find((j) => j.index === idx);
         if (!join) throw new Error(`no join at index ${idx}`);
-        return { ...review, joins: [join], focus: idx };
+        return { ...review, joins: [join], focus: idx, fixed };
       }
-      return review;
+      return { ...review, fixed };
     },
     localExecute: async (input) => {
       const doc = getDoc();
       if (doc.arrangement.length < 2) return toolErr("need a set (2+ entries) to review");
       try {
-        const { renderSetToBuffer } = await import("../audio/renderSet");
-        useSetStore.getState().setActivity("Bouncing for review…");
-        const { buffer, barsToSec } = await renderSetToBuffer(doc, (p, label) => {
-          useSetStore.getState().setActivity(`Review: ${label} ${Math.round(p * 100)}%`);
-        });
-        const mono = monoMix(buffer);
-        const review = reviewBounce(doc, mono, buffer.sampleRate, barsToSec);
+        const review = await bounceAndReview(doc);
+        const fixed = input.fix === true ? applyGainStage(review) : null;
         const idx = input.index != null ? Number(input.index) : null;
-        useSetStore
-          .getState()
-          .setActivity(`Review: ${review.clean} clean · ${review.rough} rough · ${review.broken} broken`);
         if (idx != null) {
           const join = review.joins.find((j) => j.index === idx);
           if (!join) return toolErr(`no join at index ${idx}`);
-          return toolOk({ ...review, joins: [join], focus: idx });
+          return toolOk({ ...review, joins: [join], focus: idx, fixed });
         }
-        return toolOk(review);
+        return toolOk({ ...review, fixed });
       } catch (e) {
         return toolErr(e instanceof Error ? e.message : "review failed");
       }
@@ -2276,7 +2297,7 @@ function applyRecipeExec(input: Record<string, unknown>) {
     }
   }
 
-  // A ride bends pitch without keylock — force it on both decks.
+  // Keep keylock on — the performer rides a musical interval on SoundTouch.
   if (index > 0 && (recipe === "tempo_ride" || applied.type === "tempo_ride")) {
     dispatch({ type: "deck.setOptions", deck: "A", keylock: true });
     dispatch({ type: "deck.setOptions", deck: "B", keylock: true });

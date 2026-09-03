@@ -91,7 +91,7 @@ export const DJ_PLAYBOOK_REFS = {
       type: "tease_slam",
       bars: "8–16",
       compiles:
-        "The chop default — take the outgoing record INTO the incoming one. TEASE: the incoming build bleeds in under the outgoing (LP-filtered, bass killed, fader low, xfader drifting off the rail). BUILD: incoming opens, outgoing HP-rises, FX send swells, the performer stutters a 1→0.5 loop roll on the outgoing's last 2 bars, and a tempo lane rides outBPM→inBPM across the whole window when Δ>3 (authored by prepare_set/apply_transition_recipe — verify demands the lane) with the outgoing unlocking pitch for the FINAL 4 bars only — the scream stacks with the roll; a full-window unlock goes thin. THE 1: bass swap + xfader snap + echo throw tail ringing over the incoming drop. Parks incoming at drop−bars so the drop lands exactly on the commit; outgoing rides its drop phrase, then leaves.",
+        "The chop default — take the outgoing record INTO the incoming one. TEASE: the incoming build bleeds in under the outgoing (LP-filtered, bass killed, fader low, xfader drifting off the rail). BUILD: incoming opens, outgoing HP-rises, FX send swells, the performer stutters a 1→0.5 loop roll on the outgoing's last 2 bars, and a tempo lane rides outBPM→inBPM across the whole window when Δ>3 (authored by prepare_set/apply_transition_recipe — verify demands the lane). Over the FINAL 4 bars the outgoing stays keylocked and SoundTouch rides onto a musical interval (energy-boost lands on the incoming tonic; same-key snaps vinyl cents to semitones) so it doesn't sit 50¢ sharp against the incoming. THE 1: the incoming is already fully open (a bar early — no masked first hit), the outgoing dips under its roll, then bass swap + a 1/16-bar xfader flick + echo throw tail over the drop. Parks incoming at drop−bars so the drop lands exactly on the commit; outgoing rides its drop phrase, then leaves.",
     },
     drop_swap: {
       type: "drop_swap",
@@ -138,7 +138,7 @@ export const DJ_PLAYBOOK_REFS = {
       type: "tempo_ride",
       bars: "16",
       compiles:
-        "For ridable BPM gaps (6–10%): both decks ramp from the outgoing BPM to the incoming BPM across a 16-bar isolator overlap — the performer unlocks the OUTGOING deck's pitch for the ride's final 4 bars so it screams into the commit (vinyl ride); the incoming stays keylocked so the drop lands true. Commit (bass swap) on the incoming drop 8 bars in, then the outgoing peels while the ride finishes. Needs a tempo lane; verify demands it. Past 10% the ride is a stretch — slam or throw instead.",
+        "For ridable BPM gaps (6–10%): both decks ramp from the outgoing BPM to the incoming BPM across a 16-bar isolator overlap — keylock stays on; the outgoing rides a musical pitch interval over the final 4 bars (energy-boost meets the incoming key; same-key snaps the vinyl cents), the incoming stays true. Commit (bass swap) on the incoming drop 8 bars in, then the outgoing peels while the ride finishes. Needs a tempo lane; verify demands it. Past 10% the ride is a stretch — slam or throw instead.",
     },
     power_block: { type: "cut", bars: "1", compiles: "1-bar cuts; pair with short trims." },
   },
@@ -155,7 +155,7 @@ You choose: tease the next record in and slam it (tease_slam — the default), r
 
 A transition is a handoff, not a switch: the crowd should HEAR the next record arriving (filtered tease of its build), feel the pitch ride (tempo lane across the window), brace (loop roll + HP rise + FX swell), then get the drop on the 1. Cold cut / air_cut / backspin share no clock and are the exception — half/double-time records, or deliberate shock.
 
-Far BPM: tease_slam rides ANY same-direction gap — the tempo lane ramps both decks across the tease window, and the outgoing deck unlocks pitch for the ride's FINAL 4 bars so the scream stacks with the roll into the 1 (the incoming stays locked, the drop lands true). Only 2:1 clocks (half/double) still air-slam. Slam joins (cut / backspin / air_cut) share no clock.
+Far BPM: tease_slam rides ANY same-direction gap — the tempo lane ramps both decks across the tease window, and over the FINAL 4 bars the outgoing rides a musical pitch interval (not a keylock-off vinyl detune) so the scream stacks with the roll into the 1 (the incoming stays locked, the drop lands true). Only 2:1 clocks (half/double) still air-slam. Slam joins (cut / backspin / air_cut) share no clock.
 
 Same-BPM label clashes in blend grammar can hole-park; in chop the tease is LP-filtered and bassless, so a label clash is mostly masked — on a measured clash, shorten the tease to 8. A closer lands on its drop, never from silence.
 
@@ -196,7 +196,7 @@ loop_roll     incoming teases in filtered, 2→1→0.5 roll, then cut
 backspin      rewind (loud, delay throw) then xfader slam — native BPM each side
 hook_layer    outgoing mid over a new bed
 half_bridge   echo-shaped exit + tempo to half/double
-tempo_ride    6–10% BPM gap: ramp both decks, outgoing unlocks pitch for the final 4 bars (scream), commit on the drop, peel
+tempo_ride    6–10% BPM gap: ramp both decks, outgoing rides a musical pitch interval for the final 4 bars, commit on the drop, peel
 power_block   1-bar cuts
 
 Cue math you apply yourself (or let apply_transition_recipe park it):
@@ -220,7 +220,7 @@ const VERIFY = `verify_set errors (broken mix — fix the automation):
 
 Slam joins (cut / backspin / air_cut) are exempt from key caps and ΔBPM ramps by design; tease_slam is exempt from raw-window clash caps (the tease is filtered/bassless) but never from the ramp. warns are observations (phrase, both-sides vocals, energy shape). Keep them if you meant it.
 
-review_set is the SOUND check: it bounces the set offline and measures every join from the rendered audio — dead air at the commit, |level jump| > 6dB across the 1, a tease whose mids fall, double bass during the tease, a slam that doesn't lift. verify_set checks the doc; review_set checks what the room hears. ready:true + review clean = play it. Rough/broken → fix the join (recipe, bars, trims, gain) and re-run.`;
+review_set is the SOUND check: it bounces the set offline and measures every join from the rendered audio — dead air at the commit, |level jump| > 5dB across the 1 (a dipped slam's lift is musical — over 5dB is a wall), a tease whose mids fall, double bass during the tease, a drop whose first hit lands half-open (first_hit < 0.7), a slam that doesn't lift. verify_set checks the doc; review_set checks what the room hears. ready:true + review clean = play it. Rough/broken → fix the join (recipe, bars, trims); hot/sagging slams → review_set fix:true writes gainstage lanes, then re-run to confirm.`;
 
 const EXEMPLAR = `APPROVED EXEMPLAR — a 4-track peak-time chop set the human signed off on by ear. Copy this SHAPE:
 

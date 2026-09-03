@@ -2,6 +2,7 @@ import type { SetDoc, Track } from "../types/setdoc";
 import { auditionHarmony, classifyCamelotMove, holeParkedAt, isolatorOverlapCap, isIsolatorType, isPadType, keyIsTrusted, padCapForJoin, phraseOffGrid, snapToPhrase, vocalCovers, type HarmonyAudition } from "./builder";
 import { findDropBars, findPeakDropBars, joinCompileReport, tempoRelation } from "./craft";
 import { buildTimeline } from "./timeline";
+import { ridePitchSemitones } from "./pitchRide";
 import { readAudioBlob } from "../storage/opfs";
 import { decodeAudioFile } from "../analysis/runAnalysis";
 
@@ -176,6 +177,11 @@ export async function previewJoin(
   const move = classifyCamelotMove(ta.analysis.key.camelot, tb.analysis.key.camelot);
   const rel = tempoRelation(ta.analysis.bpm, tb.analysis.bpm);
   const pitchPct = ((tb.analysis.bpm - ta.analysis.bpm) / ta.analysis.bpm) * 100;
+  const pitchRide = ridePitchSemitones({
+    fromCamelot: ta.analysis.key.camelot,
+    toCamelot: tb.analysis.key.camelot,
+    tempoRatio: tb.analysis.bpm / Math.max(1e-6, ta.analysis.bpm),
+  });
   const trusted = keyIsTrusted(ta) && keyIsTrusted(tb);
   // Hole-aware: a blend parked on the outgoing's tonal hole can run 8 bars
   // even on a label clash — the harmonies never co-occur.
@@ -226,7 +232,11 @@ export async function previewJoin(
   }
   if (type === "tempo_ride") {
     notes.push(
-      `Ride: both decks ramp ${ta.analysis.bpm.toFixed(1)}→${tb.analysis.bpm.toFixed(1)} across the overlap — the outgoing unlocks pitch for the final 4 bars (the scream), the incoming stays true; isolator commit on the incoming drop, then peel.`,
+      `Ride: both decks ramp ${ta.analysis.bpm.toFixed(1)}→${tb.analysis.bpm.toFixed(1)} across the overlap — outgoing pitch ` +
+        (pitchRide === 0
+          ? "stays locked (a vinyl unlock would sit between keys)"
+          : `rides ${pitchRide > 0 ? "+" : ""}${pitchRide} st over the last 4 bars (${move === "energy_boost" ? "lands on incoming tonic" : "quantized vinyl"})`) +
+        `; incoming stays true; isolator commit on the incoming drop, then peel.`,
     );
   }
   if (type === "tease_slam") {
@@ -234,6 +244,9 @@ export async function previewJoin(
       `Tease slam: the incoming build bleeds in filtered under the outgoing across ${bars} bars` +
         (Math.abs(pitchPct) > 3
           ? `, the tempo lane rides ${ta.analysis.bpm.toFixed(0)}→${tb.analysis.bpm.toFixed(0)} across the window`
+          : "") +
+        (pitchRide !== 0
+          ? `, outgoing pitch rides ${pitchRide > 0 ? "+" : ""}${pitchRide} st into the 1`
           : "") +
         `, roll + throw, slam on the incoming 1.`,
     );

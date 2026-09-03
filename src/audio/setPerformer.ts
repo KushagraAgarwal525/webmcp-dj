@@ -19,6 +19,7 @@ import {
 import { getAudioBuffer, peekAudioBuffer } from "./bufferCache";
 import { captureSetPlay } from "../analytics/tools";
 import { applyAutomationToDoc } from "./liveMixer";
+import { ridePitchAmount, ridePitchSemitones, RIDE_PITCH_BARS } from "../set/pitchRide";
 
 type ActiveSlot = {
   entryIndex: number;
@@ -42,8 +43,6 @@ class SetPerformer {
   private suppressDriftUntil = 0;
   private hiddenTimer: ReturnType<typeof setInterval> | undefined;
   private visibilityWatch = false;
-  /** Decks WE unlocked for a ride scream → the track they rode (safe restore). */
-  private rideKeylockOff = new Map<DeckId, string>();
 
   isPlaying() {
     return useSetStore.getState().transport.setPlaying;
@@ -125,6 +124,7 @@ class SetPerformer {
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
       await this.runSyncDecks(true);
       this.applyAutomation(useSetStore.getState().doc, this.positionBars);
+      this.applyRidePitch(useSetStore.getState().doc, this.positionBars);
       this.flushAutomationDoc(true);
 
       this.attachVisibility();
@@ -147,70 +147,79 @@ class SetPerformer {
     this.flushAutomationDoc(true);
     audioEngine.endLiveMix();
     audioEngine.setPerformerSync(false);
+    this.clearRidePitch();
     useSetStore.getState().setTransport({ setPlaying: false });
     for (const deck of ["A", "B"] as const) {
       if (useSetStore.getState().doc.decks[deck].playing) {
         useSetStore.getState().dispatch({ type: "deck.pause", deck }, "system");
       }
     }
-    // Restore ride keylocks while the decks are stopped — click-free.
-    for (const deck of this.rideKeylockOff.keys()) {
-      if (!useSetStore.getState().doc.decks[deck].keylock) {
-        useSetStore.getState().dispatch(
-          { type: "deck.setOptions", deck, keylock: true },
-          "system",
-        );
-      }
-    }
-    this.rideKeylockOff.clear();
     this.active = {};
     useSetStore.getState().setActivity("Paused");
   }
 
   /**
-   * Vinyl pitch drama on tempo rides — dosed. Only the FINAL 4 bars of the
-   * lane unlock the OUTGOING deck's keylock: the scream stacks with the HP
-   * rise and the loop roll where the build peaks. A full-window unlock lets
-   * the pitch creep for 12+ bars — the bass rises off its sweet spot and the
-   * record goes thin (that read as "dull"). The incoming deck keeps keylock
-   * so the drop lands pitch-true with no stretch-toggle click on the 1.
-   * Restore once the deck is idle OR has moved to another record (the engine
-   * restarts the source on load anyway, so the toggle rides along) — before
-   * the track check, a deck that rolled straight into the next span kept
-   * keylock off for the whole record.
+   * Musical pitch ride on the outgoing deck. Keylock stays on — SoundTouch
+   * ramps onto a harmonic interval instead of a vinyl unlock (BPM-ratio
+   * cents sit between keys and read as "a tiny bit off"). Incoming stays
+   * at pitch 0 so the drop lands true.
    */
-  private applyRideKeylock(doc: SetDoc, setBars: number) {
-    const activeLane = allAutomation(doc).find(
-      (l) => l.param === "tempo" && setBars >= l.startBars && setBars <= l.endBars,
+  private applyRidePitch(doc: SetDoc, setBars: number) {
+    const live = buildTimeline(doc).filter(
+      (s) => setBars >= s.setStart && setBars < s.setEnd,
     );
-    const screaming = activeLane != null && setBars >= activeLane.endBars - 4;
-    if (screaming) {
-      const live = buildTimeline(doc).filter(
-        (s) => setBars >= s.setStart && setBars < s.setEnd,
-      );
-      if (live.length > 1) {
-        const outgoing = live.reduce((a, b) => (a.setStart <= b.setStart ? a : b));
-        const deck = outgoing.deck;
-        if (doc.decks[deck].keylock) {
-          useSetStore.getState().dispatch(
-            { type: "deck.setOptions", deck, keylock: false },
-            "system",
-          );
-        }
-        this.rideKeylockOff.set(deck, outgoing.entry.trackId);
-      }
-      return;
-    }
-    for (const [deck, rodeTrack] of this.rideKeylockOff) {
-      const d = doc.decks[deck];
-      if (!d.keylock && (!d.playing || d.trackId !== rodeTrack)) {
-        useSetStore.getState().dispatch(
-          { type: "deck.setOptions", deck, keylock: true },
-          "system",
+    const targets: Record<"A" | "B", number> = { A: 0, B: 0 };
+    const arm: Record<"A" | "B", boolean> = { A: false, B: false };
+    if (live.length > 1) {
+      const outgoing = live.reduce((a, b) => (a.setStart <= b.setStart ? a : b));
+      const incoming = live.reduce((a, b) => (a.setStart >= b.setStart ? a : b));
+      const kind = incoming.entry.transition.type;
+      if (
+        !joinIsClockIndependent(kind) &&
+        kind !== "cut" &&
+        kind !== "air_cut"
+      ) {
+        const overlapEnd = Math.min(outgoing.setEnd, incoming.setStart + incoming.overlapBars);
+        const overlapBars = Math.max(0.25, overlapEnd - incoming.setStart);
+        const windowBars = Math.min(RIDE_PITCH_BARS, overlapBars);
+        const amount = ridePitchAmount(setBars, overlapEnd, windowBars);
+        const outTrack = doc.tracks[outgoing.entry.trackId];
+        const inTrack = doc.tracks[incoming.entry.trackId];
+        const native = outTrack?.analysis?.bpm ?? entryBpm(doc, outgoing.entry);
+        const tempoLane = allAutomation(doc).find(
+          (l) =>
+            l.param === "tempo" &&
+            l.endBars >= incoming.setStart - 0.05 &&
+            l.startBars <= overlapEnd + 0.05,
         );
-        this.rideKeylockOff.delete(deck);
+        const landBpm =
+          tempoLane != null && tempoLane.endValue > 0
+            ? tempoLane.endValue
+            : entryBpm(doc, incoming.entry);
+        const target = ridePitchSemitones({
+          fromCamelot: outTrack?.analysis?.key.camelot,
+          toCamelot: inTrack?.analysis?.key.camelot,
+          tempoRatio: landBpm / Math.max(1e-6, native),
+        });
+        if (target !== 0 && setBars >= overlapEnd - windowBars - 8) {
+          arm[outgoing.deck] = true;
+        }
+        if (amount > 0) {
+          targets[outgoing.deck] = target * amount;
+        }
       }
     }
+    audioEngine.armRideStretch("A", arm.A);
+    audioEngine.armRideStretch("B", arm.B);
+    audioEngine.setRidePitch("A", targets.A);
+    audioEngine.setRidePitch("B", targets.B);
+  }
+
+  private clearRidePitch() {
+    audioEngine.armRideStretch("A", false);
+    audioEngine.armRideStretch("B", false);
+    audioEngine.setRidePitch("A", 0);
+    audioEngine.setRidePitch("B", 0);
   }
 
   async seek(setBars: number) {
@@ -228,6 +237,7 @@ class SetPerformer {
     await this.waitForSyncIdle();
     await this.runSyncDecks(this.isPlaying());
     this.applyAutomation(useSetStore.getState().doc, this.positionBars);
+    this.applyRidePitch(useSetStore.getState().doc, this.positionBars);
     this.flushAutomationDoc(true);
     this.lastCtxTime = audioEngine.getCurrentTime();
     // Keep UI playheads in sync immediately after ruler seek.
@@ -298,7 +308,7 @@ class SetPerformer {
     }
     this.applyAutomation(doc, this.positionBars);
     this.applyBackspin(doc, this.positionBars);
-    this.applyRideKeylock(doc, this.positionBars);
+    this.applyRidePitch(doc, this.positionBars);
   }
 
   private async playLooseDecks() {
@@ -329,7 +339,7 @@ class SetPerformer {
 
     this.applyAutomation(doc, this.positionBars);
     this.applyLoopOut(doc, this.positionBars);
-    this.applyRideKeylock(doc, this.positionBars);
+    this.applyRidePitch(doc, this.positionBars);
     if (typeof document === "undefined" || document.visibilityState === "visible") {
       void this.queueSyncDecks(doc, this.positionBars, true);
     }
