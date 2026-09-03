@@ -46,6 +46,29 @@ export function camelotNumberDelta(a: string, b: string): number {
   return Math.min(Math.abs(pa.n - pb.n), 12 - Math.abs(pa.n - pb.n));
 }
 
+/**
+ * Tonic pitch class 0=C. 8A (Am) = 9; each Camelot step is a fifth;
+ * A→B is the relative (+3). Mode is not encoded — pitching 8A up 3
+ * semitones yields C minor, not 8B (C major).
+ */
+export function camelotPitchClass(code: string): number | null {
+  const p = parseCamelot(code);
+  if (!p) return null;
+  const minorPc = (((9 + (p.n - 8) * 7) % 12) + 12) % 12;
+  return p.letter === "A" ? minorPc : (minorPc + 3) % 12;
+}
+
+/** Shortest signed tonic distance, −6..+6. Energy boost is ±2; a fifth is ±5. */
+export function camelotSemitoneDelta(from: string, to: string): number | null {
+  const a = camelotPitchClass(from);
+  const b = camelotPitchClass(to);
+  if (a == null || b == null) return null;
+  let d = b - a;
+  if (d > 6) d -= 12;
+  if (d < -6) d += 12;
+  return d;
+}
+
 /** Below this, Camelot is a guess — no long tonal pad. */
 export const KEY_CONFIDENCE_OK = 0.55;
 
@@ -983,9 +1006,8 @@ export function verifySet(
             severity: "warn",
           });
         }
-        // Keylock is the performer's business during a ride: the outgoing
-        // deck rides keylock-off (the pitch climb is the point), the incoming
-        // stays locked so the drop lands true. No warn — that IS the move.
+        // Pitch ride is the performer's business: keylock stays on, SoundTouch
+        // walks the outgoing onto a musical interval, incoming stays true.
       }
       const from = ta.analysis.key.camelot;
       const to = tb.analysis.key.camelot;

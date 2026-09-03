@@ -370,8 +370,9 @@ export function compileTransitionAutomation(doc: SetDoc): AutomationLane[] {
       // (LP-filtered, bass killed, fader low, xfader drifting off the rail);
       // BUILD — the incoming opens while the outgoing HP-rises and the FX
       // send swells (prepare_set/apply_recipe also lay a tempo lane across
-      // this window, so the whole room rides the pitch into the 1; the
-      // performer stutters a 1→0.5 loop roll on the outgoing's last 2 bars);
+      // this window; over the last 4 bars the outgoing rides a musical
+      // pitch interval while the incoming stays keylocked. The performer
+      // stutters a 1→0.5 loop roll on the outgoing's last 2 bars);
       // THE 1 — bass swap, xfader snap, the outgoing dies into an echo throw
       // whose tail rings over the incoming drop. The composer parks the
       // incoming at drop−bars so its drop lands exactly on the commit.

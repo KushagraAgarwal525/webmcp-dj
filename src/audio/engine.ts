@@ -45,6 +45,10 @@ type DeckNodes = {
   levelBuf: Uint8Array<ArrayBuffer>;
   /** Vinyl rewind: a reversed slice is playing; skip forward seeks / rate writes. */
   reversing: boolean;
+  /** Musical pitch ride (semitones) — SoundTouch, keylock stays on. */
+  rideSemitones: number;
+  /** Keep the worklet up so the ride doesn't rebuild the graph mid-overlap. */
+  rideArmed: boolean;
 };
 
 class AudioEngine {
@@ -354,6 +358,8 @@ class AudioEngine {
       analyser,
       levelBuf: new Uint8Array(new ArrayBuffer(analyser.fftSize)),
       reversing: false,
+      rideSemitones: 0,
+      rideArmed: false,
     };
   }
 
@@ -436,8 +442,28 @@ class AudioEngine {
     nodes.stretchConnected = false;
   }
 
+  /** Reroute a live dry source through SoundTouch — no playhead restart. */
+  private hotAttachStretch(nodes: DeckNodes, keylock: boolean) {
+    if (!nodes.source || !this.workletReady) return;
+    try {
+      nodes.source.disconnect();
+    } catch {
+      /* */
+    }
+    const st = this.ensureStretch(nodes);
+    if (!st) {
+      nodes.source.connect(nodes.eqLow);
+      nodes.useStretch = false;
+      return;
+    }
+    nodes.source.connect(st);
+    this.attachStretch(nodes);
+    nodes.useStretch = true;
+    this.writeStretchPitch(nodes, keylock, true);
+  }
+
   /** Snapshot elapsed buffer time before changing rate so the estimator stays honest. */
-  private setDeckRate(nodes: DeckNodes, tempoRatio: number) {
+  private setDeckRate(nodes: DeckNodes, tempoRatio: number, keylock: boolean) {
     const rate = Math.max(0.05, tempoRatio);
     if (nodes.playing && this.ctx && Math.abs(rate - nodes.rate) > 1e-6) {
       nodes.offsetSec += (this.ctx.currentTime - nodes.startedAt) * nodes.rate;
@@ -445,10 +471,46 @@ class AudioEngine {
     }
     nodes.rate = rate;
     if (nodes.source) nodes.source.playbackRate.value = rate;
-    if (nodes.useStretch && nodes.stretch) {
-      nodes.stretch.playbackRate.value = rate;
-      nodes.stretch.pitch.value = 1;
+    this.writeStretchPitch(nodes, keylock, false);
+  }
+
+  /**
+   * Keylock on: pitch = 2^(ride/12) (1 when idle). Keylock off: pitch follows
+   * rate (vinyl) — we keep the worklet so toggling KL doesn't rebuild the graph.
+   */
+  private writeStretchPitch(nodes: DeckNodes, keylock: boolean, snap: boolean) {
+    if (!nodes.useStretch || !nodes.stretch || !this.ctx) return;
+    nodes.stretch.playbackRate.value = nodes.rate;
+    const pitchMul = keylock ? Math.pow(2, nodes.rideSemitones / 12) : nodes.rate;
+    nodes.stretch.pitchSemitones.value = 0;
+    if (snap) {
+      nodes.stretch.pitch.value = pitchMul;
+      return;
     }
+    const t = this.ctx.currentTime;
+    nodes.stretch.pitch.setTargetAtTime(pitchMul, t, 0.04);
+  }
+
+  /** Performer pitch ride — keeps keylock on; SoundTouch does the interval. */
+  setRidePitch(deck: DeckId, semitones: number) {
+    const nodes = this.decks?.[deck];
+    if (!nodes) return;
+    if (Math.abs(nodes.rideSemitones - semitones) < 0.01) {
+      nodes.rideSemitones = semitones;
+      return;
+    }
+    nodes.rideSemitones = semitones;
+    const keylock = useSetStore.getState().doc.decks[deck].keylock;
+    this.writeStretchPitch(nodes, keylock, false);
+  }
+
+  /** Arm the keylock worklet ahead of a pitch ride so the graph doesn't cut. */
+  armRideStretch(deck: DeckId, on: boolean) {
+    const nodes = this.decks?.[deck];
+    if (!nodes) return;
+    if (nodes.rideArmed === on) return;
+    nodes.rideArmed = on;
+    if (on) this.requestSync();
   }
 
   private tempoLaneSoon(doc: SetDoc): boolean {
@@ -469,9 +531,13 @@ class AudioEngine {
     playingStretch: boolean,
     starting: boolean,
     doc: SetDoc,
+    rideArmed: boolean,
   ): boolean {
-    if (!keylock || !this.workletReady) return false;
+    if (!this.workletReady) return false;
+    // Stay on the worklet once playing — vinyl is pitch=rate, not a graph cut.
     if (playingStretch) return true;
+    if (rideArmed) return true;
+    if (!keylock) return false;
     if (Math.abs(tempoRatio - 1) > STRETCH_IDENTITY) return true;
     return starting && this.tempoLaneSoon(doc);
   }
@@ -743,10 +809,11 @@ class AudioEngine {
         nodes.useStretch && nodes.playing,
         !nodes.playing,
         useSetStore.getState().doc,
+        nodes.rideArmed,
       );
 
       if (nodes.source && nodes.playing) {
-        this.setDeckRate(nodes, tempoRatio2);
+        this.setDeckRate(nodes, tempoRatio2, d2.keylock);
       }
 
       const prev = prevSnap?.[deck];
@@ -763,9 +830,13 @@ class AudioEngine {
       ) {
         this.seekPlaying(deck, d2.positionBars, d2);
       } else if (d2.playing && nodes.playing && wantStretch2 !== nodes.useStretch) {
-        const pos = this.getPositionBars(deck);
-        this.stopDeck(deck);
-        this.startDeck(deck, pos, nativeBpm2, tempoRatio2, wantStretch2);
+        if (wantStretch2 && nodes.source) {
+          this.hotAttachStretch(nodes, d2.keylock);
+        } else {
+          const pos = this.getPositionBars(deck);
+          this.stopDeck(deck);
+          this.startDeck(deck, pos, nativeBpm2, tempoRatio2, wantStretch2);
+        }
       }
 
       if (nodes.playing && !nodes.reversing) {
@@ -803,6 +874,7 @@ class AudioEngine {
       nodes.useStretch && nodes.playing,
       true,
       useSetStore.getState().doc,
+      nodes.rideArmed,
     );
     this.stopDeck(deck, false, nodes.useStretch && wantStretch);
     this.startDeck(deck, positionBars, nativeBpm, tempoRatio, wantStretch);
@@ -841,6 +913,7 @@ class AudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = nodes.buffer;
     src.playbackRate.value = rate;
+    nodes.rate = rate;
     if (loopWin) {
       src.loop = true;
       src.loopStart = loopWin.start;
@@ -856,11 +929,11 @@ class AudioEngine {
     if (stretch && this.workletReady) {
       const st = this.ensureStretch(nodes);
       if (st) {
-        st.playbackRate.value = rate;
-        st.pitch.value = 1;
         src.connect(st);
         this.attachStretch(nodes);
         nodes.useStretch = true;
+        const keylock = live.keylock;
+        this.writeStretchPitch(nodes, keylock, true);
       } else {
         src.connect(nodes.eqLow);
         this.detachStretch(nodes);
@@ -874,7 +947,6 @@ class AudioEngine {
 
     src.start(0, offset);
     nodes.source = src;
-    nodes.rate = rate;
     nodes.startedAt = this.ctx.currentTime;
     nodes.offsetSec = offset;
     nodes.playing = true;

@@ -955,7 +955,7 @@ function chooseJoinBlend(outgoing: Track, incoming: Track): JoinPick {
     return {
       recipe: "tempo_ride",
       bars: 16,
-      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks across a 16-bar isolator (outgoing rides keylock-off), commit on the incoming drop at ${inDrop}.`,
+      reason: `${outA.bpm.toFixed(0)}→${inA.bpm.toFixed(0)} (+${(ridePct * 100).toFixed(1)}%) is ridable — ramp both decks across a 16-bar isolator (outgoing rides a musical pitch interval, keylock stays on), commit on the incoming drop at ${inDrop}.`,
     };
   }
 

@@ -2276,7 +2276,7 @@ function applyRecipeExec(input: Record<string, unknown>) {
     }
   }
 
-  // A ride bends pitch without keylock — force it on both decks.
+  // Keep keylock on — the performer rides a musical interval on SoundTouch.
   if (index > 0 && (recipe === "tempo_ride" || applied.type === "tempo_ride")) {
     dispatch({ type: "deck.setOptions", deck: "A", keylock: true });
     dispatch({ type: "deck.setOptions", deck: "B", keylock: true });
